@@ -1,7 +1,21 @@
--- MaxLeeds - spicybung
--- GPL-3.0-or-later
+-- MaxLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in 3DSMax
+-- Author: spicybung
+-- Years: 2025 - 2027
 
-global MLPspLayout, MLReadPspVector, MLReadFrames, MLReadMaterials, MLReadPspGeometry, MLReadModel, MLBuildModel, MLWritePspObject, MLFrameBoneLength, MLCreateFrameBone
+-- This program is free software: you can redistribute it and/or modify
+-- it under the terms of the GNU General Public License as published by
+-- the Free Software Foundation, either version 3 of the License, or
+-- (at your option) any later version.
+
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-- GNU General Public License for more details.
+
+-- You should have received a copy of the GNU General Public License
+-- along with this program.  If not, see <https://www.gnu.org/licenses/>.
+
+global MLPspLayout, MLReadPspVector, MLReadFrames, MLReadMaterials, MLReadPspGeometry, MLReadModel, MLBuildModel, MLWritePspObject, MLFrameBoneTarget, MLCreateFrameBone
 fn MLPspLayout flags =
 (
     local formats = #(MLBits flags 9 2, MLBits flags 0 2, MLBits flags 2 3, MLBits flags 5 2, MLBits flags 7 2)
@@ -49,7 +63,11 @@ fn MLReadFrames reader pointer platform game frames parentWorld visited =
     local parentPointer = reader.atLong (pointer + 4)
     local localMatrix = reader.matrix (pointer + 0x10)
     local globalMatrix = reader.matrix (pointer + 0x50)
-    local world = if (length globalMatrix.row1) < 1.0e-8 or (length globalMatrix.row2) < 1.0e-8 or (length globalMatrix.row3) < 1.0e-8 then localMatrix * parentWorld else globalMatrix
+    local world = localMatrix * parentWorld
+    if game != "LCS" do
+    (
+        if (length globalMatrix.row1) >= 1.0e-8 and (length globalMatrix.row2) >= 1.0e-8 and (length globalMatrix.row3) >= 1.0e-8 do world = globalMatrix
+    )
     local nameOffset = if platform == "PSP" or game == "VCS" then 0xA8 else 0xA4
     local namePointer = reader.atLong (pointer + nameOffset)
     local name = if namePointer > 0 then reader.text namePointer (amin 128 (reader.length - namePointer)) else "bone" + frames.count as string
@@ -266,39 +284,42 @@ fn MLReadModel path game platform =
         throw()
     )
 )
-fn MLFrameBoneLength frame frames =
+fn MLFrameBoneTarget frame frames =
 (
-    local boneLength = 0.0
+    local startPosition = frame.worldMatrix.row4
+    local bestDistance = 0.0
+    local bestPosition = undefined
     for child in frames where child.parentPointer == frame.pointer do
     (
-        local childDistance = distance frame.worldMatrix.row4 child.worldMatrix.row4
+        local childPosition = child.worldMatrix.row4
+        local childDistance = distance startPosition childPosition
         if childDistance > 0.00001 do
         (
-            if boneLength == 0.0 or childDistance < boneLength do boneLength = childDistance
-        )
-    )
-    if boneLength == 0.0 do
-    (
-        for child in frames where child.parentPointer == frame.parentPointer and child.pointer != frame.pointer do
-        (
-            local siblingDistance = distance frame.worldMatrix.row4 child.worldMatrix.row4
-            if siblingDistance > 0.00001 do
+            if bestPosition == undefined or childDistance < bestDistance do
             (
-                if boneLength == 0.0 or siblingDistance < boneLength do boneLength = siblingDistance
+                bestPosition = childPosition
+                bestDistance = childDistance
             )
         )
     )
-    if boneLength == 0.0 do boneLength = 0.1
-    boneLength
+    if bestPosition != undefined then bestPosition
+    else
+    (
+        local direction = frame.worldMatrix.row1
+        if (length direction) < 0.00001 then direction = [1,0,0]
+        startPosition + (normalize direction) * 0.025
+    )
 )
 
 fn MLCreateFrameBone frame frames =
 (
     local world = frame.worldMatrix
     local startPosition = world.row4
+    local endPosition = MLFrameBoneTarget frame frames
     local xAxis = world.row1
     local zAxis = world.row3
-    if (length xAxis) < 0.000001 or (length zAxis) < 0.000001 do throw "A model bone has a zero-length orientation axis."
+    if (length xAxis) < 0.000001 or (length zAxis) < 0.000001 do
+        throw "A model bone has an invalid orientation."
     xAxis = normalize xAxis
     zAxis = normalize zAxis
     if (abs (dot xAxis zAxis)) > 0.9999 do
@@ -307,8 +328,8 @@ fn MLCreateFrameBone frame frames =
         if (length yAxis) < 0.000001 do throw "A model bone has an invalid orientation."
         zAxis = normalize (cross xAxis (normalize yAxis))
     )
-    local boneLength = MLFrameBoneLength frame frames
-    local endPosition = startPosition + xAxis * boneLength
+    local boneDirection = normalize (endPosition - startPosition)
+    local boneLength = distance startPosition endPosition
     local node = undefined
     try
     (
@@ -318,10 +339,25 @@ fn MLCreateFrameBone frame frames =
         node.setBoneEnable false 0
         node.boneAutoAlign = false
         node.boneScaleType = #none
-        node.width = amax 0.005 (boneLength * 0.075)
+        node.width = amax 0.003 (amin 0.01 (boneLength * 0.035))
         node.height = node.width
         node.length = boneLength
         node.transform = world
+        
+        -- Keep the original frame orientation as the bone pivot.
+        -- Only the display geometry is rotated to meet its real child joint.
+        local alignmentDot = amax -1.0 (amin 1.0 (dot xAxis boneDirection))
+        if alignmentDot < 0.999999 do
+        (
+            local alignmentAxis = cross xAxis boneDirection
+            if (length alignmentAxis) < 0.000001 do
+            (
+                alignmentAxis = cross xAxis [0,0,1]
+                if (length alignmentAxis) < 0.000001 do alignmentAxis = cross xAxis [0,1,0]
+            )
+            alignmentAxis = normalize alignmentAxis
+            node.objectOffsetRot = quat (acos alignmentDot) alignmentAxis
+        )
         node
     )
     catch
@@ -370,6 +406,9 @@ fn MLBuildModel model =
         for index = 1 to model.frames.count do
         (
             frameNodes[index].setBoneEnable true 0
+            frameNodes[index].boneAutoAlign = false
+            frameNodes[index].boneScaleType = #none
+            if model.frames[index].boneID < 0 do hide frameNodes[index]
         )
         for index = 1 to model.frames.count do
         (
@@ -382,7 +421,10 @@ fn MLBuildModel model =
             append created node
             local frameIndex = 0
             for index = 1 to model.frames.count where model.frames[index].pointer == part.framePointer do frameIndex = index
-            node.parent = if frameIndex > 0 then frameNodes[frameIndex] else root
+            -- Skin meshes cannot be parented to a weighted bone: that would apply its transform twice.
+            -- Rigid pieces still follow their model frame.
+            if part.weights.count > 0 then node.parent = root
+            else node.parent = if frameIndex > 0 then frameNodes[frameIndex] else root
             node.transform = if frameIndex > 0 then model.frames[frameIndex].worldMatrix else matrix3 1
             if part.weights.count > 0 do
             (
@@ -391,39 +433,45 @@ fn MLBuildModel model =
                 select node
                 setCommandPanelTaskMode #modify
                 modPanel.setCurrentObject modifier
-                for bone in frameNodes do skinOps.addBone modifier bone 1
+                for index = 1 to frameNodes.count do
+                (
+                    skinOps.addBone modifier frameNodes[index] (if index == frameNodes.count then 1 else 0)
+                )
                 if isProperty modifier #weightAllVertices do modifier.weightAllVertices = false
-                local allBoneIDs = for index = 1 to frameNodes.count collect index
-                local zeroWeights = for index = 1 to frameNodes.count collect 0.0
                 for vertex = 1 to part.weights.count do
                 (
                     local boneIDs = #()
                     local weights = #()
                     for influence in part.weights[vertex] do
                     (
-                        if influence[1] > frameNodes.count do throw "A skin weight refers to a missing bone."
-                        local existing = findItem boneIDs influence[1]
-                        if existing == 0 then
+                        if influence[1] < 1 or influence[1] > frameNodes.count do throw "A skin weight refers to a missing bone."
+                        if influence[2] > 0.0 do
                         (
-                            append boneIDs influence[1]
-                            append weights influence[2]
+                            local existing = findItem boneIDs influence[1]
+                            if existing == 0 then
+                            (
+                                append boneIDs influence[1]
+                                append weights influence[2]
+                            )
+                            else weights[existing] += influence[2]
                         )
-                        else weights[existing] += influence[2]
                     )
+                    if boneIDs.count == 0 do throw "A skinned vertex has no bone influence."
+                    -- Replace all influences in one operation, then preserve the game's weights.
+                    skinOps.ReplaceVertexWeights modifier vertex boneIDs weights
                     skinOps.unNormalizeVertex modifier vertex true
-                    skinOps.ReplaceVertexWeights modifier vertex allBoneIDs zeroWeights
-                    if boneIDs.count > 0 do skinOps.SetVertexWeights modifier vertex boneIDs weights
                     local actual = for index = 1 to frameNodes.count collect 0.0
                     for index = 1 to (skinOps.GetVertexWeightCount modifier vertex) do
                     (
                         local bone = skinOps.GetVertexWeightBoneID modifier vertex index
-                        actual[bone] += skinOps.GetVertexWeight modifier vertex index
+                        if bone >= 1 and bone <= actual.count do
+                            actual[bone] += skinOps.GetVertexWeight modifier vertex index
                     )
                     for index = 1 to actual.count do
                     (
                         local expectedIndex = findItem boneIDs index
                         local expected = if expectedIndex > 0 then weights[expectedIndex] else 0.0
-                        if (abs (actual[index] - expected)) > 0.00001 do throw "Max changed an imported skin weight. The model import was cancelled."
+                        if (abs (actual[index] - expected)) > 0.0001 do throw "Skin did not preserve the source bone weights."
                     )
                 )
             )

@@ -1,12 +1,27 @@
--- MaxLeeds - spicybung
--- GPL-3.0-or-later
+-- MaxLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in 3DSMax
+-- Author: spicybung
+-- Years: 2025 - 2027
+
+-- This program is free software: you can redistribute it and/or modify
+-- it under the terms of the GNU General Public License as published by
+-- the Free Software Foundation, either version 3 of the License, or
+-- (at your option) any later version.
+
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-- GNU General Public License for more details.
+
+-- You should have received a copy of the GNU General Public License
+-- along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 fileIn ((getFilenamePath (getSourceFileName())) + "Shared.ms")
 
-global MLTEXWindow, MLTEXImagePaths
+global MLTEXWindow, MLTEXImagePaths, MLTEXExportReady
 try (closeRolloutFloater MLTEXWindow) catch ()
 try (destroyDialog MLTEXTools) catch ()
 MLTEXImagePaths = #()
+MLTEXExportReady = false
 
 fn MLUIAddTexture path =
 (
@@ -23,10 +38,15 @@ fn MLUIAddTexture path =
 
 fn MLUIRefreshTextures =
 (
-    MLTEXExport.images.items = for path in MLTEXImagePaths collect (filenameFromPath path)
-    MLTEXExport.exportTextures.enabled = MLTEXImagePaths.count > 0
-    MLTEXExport.removeImage.enabled = MLTEXImagePaths.count > 0
-    MLTEXExport.clearImages.enabled = MLTEXImagePaths.count > 0
+    local displayNames = #()
+    for imagePath in MLTEXImagePaths do append displayNames (filenameFromPath imagePath)
+    if MLTEXExportReady == true do
+    (
+        MLTEXExport.images.items = displayNames
+        MLTEXExport.exportTextures.enabled = MLTEXImagePaths.count > 0
+        MLTEXExport.removeImage.enabled = MLTEXImagePaths.count > 0
+        MLTEXExport.clearImages.enabled = MLTEXImagePaths.count > 0
+    )
 )
 
 rollout MLTEXImport "Import TEX" width:214
@@ -97,7 +117,7 @@ rollout MLTEXExport "Export TEX" width:214
 
     fn selectedPlatform = #("PS2", "PSP")[platform.selection]
 
-    on MLTEXExport open do MLUIRefreshTextures()
+    on MLTEXExport close do MLTEXExportReady = false
     on images selected index do
     (
         if index > 0 and index <= MLTEXImagePaths.count do status.text = filenameFromPath MLTEXImagePaths[index]
@@ -189,4 +209,6 @@ rollout MLTEXAbout "About" width:214
 MLTEXWindow = newRolloutFloater "TEX IO" 248 640 320 90
 addRollout MLTEXImport MLTEXWindow rolledup:false
 addRollout MLTEXExport MLTEXWindow rolledup:false
+MLTEXExportReady = true
+MLUIRefreshTextures()
 addRollout MLTEXAbout MLTEXWindow rolledup:true

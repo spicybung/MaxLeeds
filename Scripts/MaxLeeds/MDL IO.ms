@@ -1,5 +1,19 @@
--- MaxLeeds - spicybung
--- GPL-3.0-or-later
+-- MaxLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in 3DSMax
+-- Author: spicybung
+-- Years: 2025 - 2027
+
+-- This program is free software: you can redistribute it and/or modify
+-- it under the terms of the GNU General Public License as published by
+-- the Free Software Foundation, either version 3 of the License, or
+-- (at your option) any later version.
+
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-- GNU General Public License for more details.
+
+-- You should have received a copy of the GNU General Public License
+-- along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 fileIn ((getFilenamePath (getSourceFileName())) + "Shared.ms")
 
@@ -43,11 +57,25 @@ rollout MLMDLImport "Import MDL" width:214
                     (
                         local model = if game.selection == 3 then MLReadManhunt path else MLReadModel path (selectedGame()) (selectedPlatform())
                         count = MLBuildModel model
+                        if game.selection != 3 do
+                        (
+                            local importedNodes = MLSelectedFamily()
+                            try
+                            (
+                                local textureCounts = MLImportModelTextures path (selectedPlatform()) importedNodes
+                                if textureCounts[2] > 0 do status.text = "Applied " + textureCounts[2] as string + " textures"
+                            )
+                            catch
+                            (
+                                format "MaxLeeds: accompanying textures could not be loaded: %\n" (getCurrentException())
+                                status.text = "Model loaded; textures unavailable"
+                            )
+                        )
                         if model.modelID >= 0 and model.modelID <= 65534 do MLMDLExport.modelID.value = model.modelID
                     )
                 )
                 redrawViews()
-                status.text = "Imported " + count as string + " objects"
+                if status.text == "Ready" do status.text = "Imported " + count as string + " objects"
             )
             catch
             (

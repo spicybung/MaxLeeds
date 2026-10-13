@@ -1,5 +1,19 @@
--- MaxLeeds - spicybung
--- GPL-3.0-or-later
+-- MaxLeeds - Scripts for working with R* Leeds (GTA Stories, Chinatown Wars, Manhunt 2, etc) formats in 3DSMax
+-- Author: spicybung
+-- Years: 2025 - 2027
+
+-- This program is free software: you can redistribute it and/or modify
+-- it under the terms of the GNU General Public License as published by
+-- the Free Software Foundation, either version 3 of the License, or
+-- (at your option) any later version.
+
+-- This program is distributed in the hope that it will be useful,
+-- but WITHOUT ANY WARRANTY; without even the implied warranty of
+-- MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+-- GNU General Public License for more details.
+
+-- You should have received a copy of the GNU General Public License
+-- along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
 global MLReadTextures, MLWriteTextures, MLPspAddress, MLPs2Address, MLTextureColor, MLQuantize, MLQuantAxis, MLCompareColors, MLQuantCode
 fn MLPspAddress x y stride = (((floor (y / 8.0)) as integer) * (stride / 16) + ((floor (x / 16.0)) as integer)) * 128 + (mod y 8) * 16 + mod x 16
@@ -140,7 +154,10 @@ fn MLReadTextures path platform destination =
             for char in #("/", "\\", ":", "*", "?", "\"", "<", ">", "|") do safeName = substituteString safeName char "_"
             if safeName == "" do safeName = "texture" + (results.count + 1) as string
             local imagePath = destination + "\\" + safeName + ".tga"
-            if doesFileExist imagePath do throw "The texture folder already contains this image. Choose an empty folder."
+            if doesFileExist imagePath do
+            (
+                if not (deleteFile imagePath) do throw "Cannot update the extracted texture file."
+            )
             image = bitmap width height filename:imagePath
             for y = 0 to height - 1 do
             (
