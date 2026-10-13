@@ -1,2 +1,2 @@
 # MaxLeeds
-3DSMax scripts for R* Leeds file formats.
+3DSMax scripts for R* Leeds file formats (Max 2010+).
