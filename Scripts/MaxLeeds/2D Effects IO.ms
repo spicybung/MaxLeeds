@@ -17,7 +17,7 @@
 
 fileIn ((getFilenamePath (getSourceFileName())) + "Shared.ms")
 
-global MLEffectsWindow, MLEffectsRoot, MLEffectsMarkers, MLEffectsFiltered, MLEffectsCurrent, MLFXRefresh, MLFXPopulate
+global MLEffectsWindow, MLEffectsRoot, MLEffectsMarkers, MLEffectsFiltered, MLEffectsCurrent, MLFXRefresh, MLFXPopulate, MLFXChoose
 try (closeRolloutFloater MLEffectsWindow) catch ()
 MLEffectsRoot = undefined
 MLEffectsMarkers = #()
@@ -31,14 +31,25 @@ fn MLFXPopulate =
 (
     local marker = MLEffectsCurrent
     if marker == undefined or not (isValidNode marker) do return false
-    local position = marker.pos
+    if (MLFXGetField marker "Type" 0) == 0 do MLWorldFXCaptureLightNode marker
+    local position = if MLEffectsRoot != undefined and isValidNode MLEffectsRoot then marker.pos * (inverse MLEffectsRoot.transform) else marker.pos
     MLEffectsCommon.positionX.value = position.x
     MLEffectsCommon.positionY.value = position.y
     MLEffectsCommon.positionZ.value = position.z
     MLEffectsCommon.descriptorType.selection = (MLFXGetField marker "Type" 0) + 1
-    MLEffectsCommon.tint.color = color (MLFXGetField marker "Red" 255) (MLFXGetField marker "Green" 255) (MLFXGetField marker "Blue" 255)
+    MLEffectsCommon.tint.color = if (MLFXGetField marker "Type" 0) == 0 then (MLWorldFXNativeColor marker) else (color (MLFXGetField marker "Red" 255) (MLFXGetField marker "Green" 255) (MLFXGetField marker "Blue" 255))
+    local kind = MLFXGetField marker "Type" -1
+    MLEffectsLight.applyLight.enabled = kind == 0
+    MLEffectsParticle.applyParticle.enabled = kind == 1
+    MLEffectsAttractor.applyAttractor.enabled = kind == 2
+    MLEffectsPed.applyPed.enabled = kind == 3
     MLEffectsCommon.alpha.value = MLFXGetField marker "Alpha" 255
     MLEffectsCommon.status.text = "Descriptor " + (MLFXGetField marker "Index" 0) as string
+    MLEffectsInspect.indexValue.text = "Index: " + (MLFXGetField marker "Index" 0) as string
+    MLEffectsInspect.offsetValue.text = "Record offset: " + (MLFXGetField marker "RecordOffset" 0) as string + " (64 bytes)"
+    MLEffectsInspect.sourceValue.text = "Original type: " + (MLWorldFXKindName (MLFXGetField marker "OriginalType" 0))
+    MLEffectsInspect.rawData.text = MLWorldFXRawReadable marker
+    MLEffectsBrowser.previewLights.checked = if (getUserProp marker "MaxLeedsFXLightNode") == "true" and isProperty marker #on then (getProperty marker #on) else false
 
     MLEffectsLight.distance.value = MLFXGetField marker "LightDistance" 0.0
     MLEffectsLight.outerRange.value = MLFXGetField marker "LightOuterRange" 0.0
@@ -76,18 +87,30 @@ fn MLFXPopulate =
 
 fn MLFXRefresh =
 (
-    MLEffectsRoot = MLWorldFXRoots()
+    local root = MLEffectsRoot
+    if root == undefined or not (isValidNode root) do root = MLWorldFXRoots()
+    if root == undefined or not (isValidNode root) do
+    (
+        MLEffectsRoot = undefined
+        MLEffectsMarkers = #()
+        MLEffectsFiltered = #()
+        MLEffectsCurrent = undefined
+        MLEffectsBrowser.descriptors.items = #()
+        MLEffectsBrowser.status.text = "No GAME.DTZ effects loaded"
+        return false
+    )
+    MLEffectsRoot = root
     MLEffectsMarkers = MLWorldFXMarkers MLEffectsRoot
     MLEffectsFiltered = #()
     local descriptions = #()
-    local filterText = toLower MLEffectsBrowser.filterText.text
+    local searchText = toLower MLEffectsBrowser.filterText.text
     for marker in MLEffectsMarkers do
     (
         local index = MLFXGetField marker "Index" 0
         local kind = MLFXGetField marker "Type" 0
-        local kindName = #("Light", "Particle", "Attractor", "Ped behaviour")[(amin 3 (amax 0 kind)) + 1]
+        local kindName = MLWorldFXKindName kind
         local label = index as string + " - " + kindName
-        if filterText == "" or (findString (toLower label) filterText) != undefined do
+        if searchText == "" or (findString (toLower label) searchText) != undefined do
         (
             append descriptions label
             append MLEffectsFiltered marker
@@ -104,18 +127,22 @@ fn MLFXRefresh =
         MLFXPopulate()
     )
     else MLEffectsCurrent = undefined
+    true
 )
 
-rollout MLEffectsBrowser "2D Effects" width:284
+rollout MLEffectsBrowser "C2DEffects" width:284
 (
     group "GAME.DTZ"
     (
-        button importEffects "Load 2D effects..." width:218 height:27 align:#center
+        button importEffects "Load GAME.DTZ / DAT..." width:218 height:27 align:#center
         editText filterText "Find:" text:"" width:250 align:#center
         button findEffects "Find / Refresh" width:125 height:24 align:#center
+        button fromSelection "Use selection" width:125 height:24 align:#center
         listBox descriptors "Descriptors:" items:#() height:9 width:250 align:#center
         button selectMarker "Select marker" width:110 height:25 align:#left across:2
         button showMarkers "Show effects" width:110 height:25 align:#right
+        checkbox previewLights "Preview selected light" checked:false align:#left
+        button previewOff "Turn off all point lights" width:218 height:25 align:#center
     )
     group "Save"
     (
@@ -129,15 +156,35 @@ rollout MLEffectsBrowser "2D Effects" width:284
         if path != undefined do
         (
             local report = MLReadWorldEffects path
+            MLEffectsRoot = MLWorldFXRoots()
             status.text = report[1] as string + " effects; " + report[2]
-            if report[1] > 0 do
+            if report[1] > 0 then
             (
                 filterText.text = ""
+                previewLights.checked = false
                 MLFXRefresh()
             )
+            else messageBox report[2] title:"MaxLeeds C2DEffects"
         )
     )
     on findEffects pressed do MLFXRefresh()
+    on fromSelection pressed do
+    (
+        MLEffectsRoot = MLWorldFXRoots()
+        filterText.text = ""
+        MLFXRefresh()
+        if selection.count > 0 do
+        (
+            local selectedNode = selection[1]
+            local matchIndex = findItem MLEffectsFiltered selectedNode
+            if matchIndex > 0 do
+            (
+                descriptors.selection = matchIndex
+                MLEffectsCurrent = selectedNode
+                MLFXPopulate()
+            )
+        )
+    )
     on filterText entered text do MLFXRefresh()
     on descriptors selected index do
     (
@@ -165,6 +212,25 @@ rollout MLEffectsBrowser "2D Effects" width:284
             status.text = "2D effect helpers are visible"
         )
     )
+    on previewLights changed state do
+    (
+        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent and (getUserProp MLEffectsCurrent "MaxLeedsFXLightNode") == "true" then
+        (
+            MLWorldFXSetNativeProperty MLEffectsCurrent #on state
+            MLWorldFXSetNativeProperty MLEffectsCurrent #enabled state
+        )
+        else previewLights.checked = false
+    )
+    on previewOff pressed do
+    (
+        for marker in MLEffectsMarkers where isValidNode marker and (getUserProp marker "MaxLeedsFXLightNode") == "true" do
+        (
+            MLWorldFXSetNativeProperty marker #on false
+            MLWorldFXSetNativeProperty marker #enabled false
+        )
+        previewLights.checked = false
+        status.text = "Point light previews disabled"
+    )
     on saveEffects pressed do
     (
         try
@@ -183,7 +249,7 @@ rollout MLEffectsBrowser "2D Effects" width:284
         catch
         (
             status.text = "Save failed"
-            messageBox (getCurrentException() as string) title:"MaxLeeds 2D Effects"
+            messageBox (getCurrentException() as string) title:"MaxLeeds C2DEffects"
         )
     )
 )
@@ -203,15 +269,16 @@ rollout MLEffectsCommon "Position, color and type" width:284
     (
         if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent do undo "MaxLeeds edit 2D effect" on
         (
-            local marker = MLEffectsCurrent
-            marker.pos = [positionX.value, positionY.value, positionZ.value]
-            MLFXSetField marker "Type" (descriptorType.selection - 1)
+            local marker = MLWorldFXConvertNode MLEffectsCurrent (descriptorType.selection - 1)
+            MLEffectsCurrent = marker
+            local localPosition = [positionX.value, positionY.value, positionZ.value]
+            marker.pos = if MLEffectsRoot != undefined and isValidNode MLEffectsRoot then localPosition * MLEffectsRoot.transform else localPosition
             MLFXSetField marker "Red" (tint.color.r as integer)
             MLFXSetField marker "Green" (tint.color.g as integer)
             MLFXSetField marker "Blue" (tint.color.b as integer)
             MLFXSetField marker "Alpha" alpha.value
             marker.wirecolor = tint.color
-            setUserProp marker "MaxLeeds2DFXType" #("Light", "Particle", "Attractor", "PedBehaviour")[descriptorType.selection]
+            if (descriptorType.selection - 1) == 0 do MLWorldFXApplyLightNode marker
             status.text = "Descriptor updated"
             MLFXRefresh()
         )
@@ -235,7 +302,7 @@ rollout MLEffectsLight "Light" width:284
 
     on applyLight pressed do
     (
-        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent do undo "MaxLeeds edit light" on
+        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent and (MLFXGetField MLEffectsCurrent "Type" -1) == 0 do undo "MaxLeeds edit light" on
         (
             local marker = MLEffectsCurrent
             MLFXSetField marker "LightDistance" distance.value
@@ -247,6 +314,8 @@ rollout MLEffectsLight "Light" width:284
             MLFXSetField marker "LightFlare" flare.value
             MLFXSetField marker "LightShadow" shadow.value
             MLFXSetField marker "LightFlags" flags.value
+            MLWorldFXApplyLightNode marker
+            MLEffectsCommon.tint.color = MLWorldFXNativeColor marker
         )
     )
 )
@@ -262,7 +331,7 @@ rollout MLEffectsParticle "Particle" width:284
 
     on applyParticle pressed do
     (
-        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent do undo "MaxLeeds edit particle" on
+        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent and (MLFXGetField MLEffectsCurrent "Type" -1) == 1 do undo "MaxLeeds edit particle" on
         (
             local marker = MLEffectsCurrent
             MLFXSetField marker "ParticleType" particleType.value
@@ -285,7 +354,7 @@ rollout MLEffectsAttractor "Attractor" width:284
 
     on applyAttractor pressed do
     (
-        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent do undo "MaxLeeds edit attractor" on
+        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent and (MLFXGetField MLEffectsCurrent "Type" -1) == 2 do undo "MaxLeeds edit attractor" on
         (
             local marker = MLEffectsCurrent
             MLFXSetField marker "AttractorX" directionX.value
@@ -310,7 +379,7 @@ rollout MLEffectsPed "Pedestrian behaviour" width:284
 
     on applyPed pressed do
     (
-        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent do undo "MaxLeeds edit behaviour" on
+        if MLEffectsCurrent != undefined and isValidNode MLEffectsCurrent and (MLFXGetField MLEffectsCurrent "Type" -1) == 3 do undo "MaxLeeds edit behaviour" on
         (
             local marker = MLEffectsCurrent
             MLFXSetField marker "PedDirectionX" directionX.value
@@ -324,11 +393,21 @@ rollout MLEffectsPed "Pedestrian behaviour" width:284
     )
 )
 
-MLEffectsWindow = newRolloutFloater "MaxLeeds - 2D Effects" 320 740 370 90
+rollout MLEffectsInspect "Original descriptor" width:284
+(
+    label indexValue "Index: -" width:250 align:#left
+    label offsetValue "Record offset: -" width:250 align:#left
+    label sourceValue "Original type: -" width:250 align:#left
+    editText rawData "Original 64 bytes:" text:"" width:250 height:95 readOnly:true align:#center
+    label note "Unknown bytes are retained when the type is unchanged." width:250 height:32 align:#center
+)
+
+MLEffectsWindow = newRolloutFloater "MaxLeeds - C2DEffects" 320 740 370 90
 addRollout MLEffectsBrowser MLEffectsWindow rolledup:false
 addRollout MLEffectsCommon MLEffectsWindow rolledup:false
 addRollout MLEffectsLight MLEffectsWindow rolledup:true
 addRollout MLEffectsParticle MLEffectsWindow rolledup:true
 addRollout MLEffectsAttractor MLEffectsWindow rolledup:true
 addRollout MLEffectsPed MLEffectsWindow rolledup:true
+addRollout MLEffectsInspect MLEffectsWindow rolledup:true
 MLFXRefresh()

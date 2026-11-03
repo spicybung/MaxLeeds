@@ -45,6 +45,8 @@ fn MLMhEncodePcMesh reader writer node original model family rebuildMaterials:fa
 (
     local header = reader.atLong (original.atomicPointer + 12)
     local recordCount = reader.atLong (header + 44)
+    if recordCount < 1 or recordCount > 4096 do throw "The source object has an invalid material record count."
+    reader.check header (180 + recordCount * 44)
     local materialInputs = #()
     local sourceType = reader.atLong (header + 144)
     local stride = reader.atLong (header + 96)
@@ -61,7 +63,14 @@ fn MLMhEncodePcMesh reader writer node original model family rebuildMaterials:fa
         local slot = reader.atShort (row + 26)
         local first = reader.atShort (row + 28)
         append materialIDs (slot + 1)
-        if count > 0 do materialBase = original.faceIDs[first / 3 + 1] - slot - 1
+        if mod count 3 != 0 or mod first 3 != 0 or first + count > original.faceIDs.count * 3 do
+            throw "The source material record has invalid face index ranges."
+        if count > 0 do
+        (
+            local base = original.faceIDs[(first / 3 + 1) as integer] - slot - 1
+            if materialBase != undefined and materialBase != base do throw "The source material slots do not share a valid material ID base."
+            materialBase = base
+        )
     )
     if materialBase == undefined do throw "The source object has no material face ranges."
     local palette = MLMhPalette reader model.frames
@@ -163,15 +172,31 @@ fn MLMhEncodePcMesh reader writer node original model family rebuildMaterials:fa
             (
                 local sourceCorner = if mirrored then #(1,3,2)[corner] else corner
                 local vertex = face[sourceCorner] as integer
-                local uv = for channel = 1 to uvCount collect (meshop.getMapVert snapshot channel (uvFaces[channel][sourceCorner] as integer))
+                local uv = #()
+                for channel = 1 to uvCount do
+                (
+                    local mapIndex = uvFaces[channel][sourceCorner] as integer
+                    if mapIndex < 1 or mapIndex > meshop.getNumMapVerts snapshot channel do
+                        throw (node.name + ": a face references an invalid UV vertex in channel " + channel as string)
+                    append uv (meshop.getMapVert snapshot channel mapIndex)
+                )
                 local normal = normalize (normals[sourceCorner] * normalTransform * inverseConversion)
                 local rgba = if vertex <= original.colors.count then copy original.colors[vertex] else color 255 255 255 255
                 if colorFace != undefined do
                 (
-                    local value = meshop.getMapVert snapshot 0 (colorFace[sourceCorner] as integer)
+                    local colorIndex = colorFace[sourceCorner] as integer
+                    if colorIndex < 1 or colorIndex > meshop.getNumMapVerts snapshot 0 do
+                        throw (node.name + ": a face references an invalid vertex colour.")
+                    local value = meshop.getMapVert snapshot 0 colorIndex
                     rgba.r = value.x * 255; rgba.g = value.y * 255; rgba.b = value.z * 255
                 )
-                if alphaFace != undefined do rgba.a = (meshop.getMapVert snapshot -2 (alphaFace[sourceCorner] as integer)).x * 255
+                if alphaFace != undefined do
+                (
+                    local alphaIndex = alphaFace[sourceCorner] as integer
+                    if alphaIndex < 1 or alphaIndex > meshop.getNumMapVerts snapshot -2 do
+                        throw (node.name + ": a face references an invalid vertex alpha.")
+                    rgba.a = (meshop.getMapVert snapshot -2 alphaIndex).x * 255
+                )
                 for component = 1 to 4 do
                 (
                     if rgba[component] != rgba[component] do throw "A vertex color is not finite."

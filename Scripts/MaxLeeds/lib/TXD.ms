@@ -88,15 +88,18 @@ fn MLReadMobileTextures path destination level:0 =
         header = MLMobileTxdHeader reader cursor 3
         reader.seek header[2]
         while reader.tell() < reader.length do if reader.byte() != 0 do throw "Unexpected data after Mobile TXD."
+        local outputNames = #()
+        for entry in entries do
+        (
+            local safeName = toLower (MLSafeTextureStem entry[1])
+            if (findItem outputNames safeName) != 0 do throw "Mobile texture names collide after filename sanitization."
+            append outputNames safeName
+        )
         makeDir destination all:true
         for entry in entries do
         (
             local name = MLSafeTextureStem entry[1]
             local imagePath = destination + "\\" + name + ".tga"
-            -- Never silently overwrite another sanitized texture name.
-            local occupied = false
-            for prior in results where (toLower prior[2]) == (toLower imagePath) do occupied = true
-            if occupied do throw "Mobile texture names collide after filename sanitization."
             temporary = MLTemporaryFile imagePath
             output.openFile temporary entry[2] entry[3]
             local palette = #()

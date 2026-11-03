@@ -33,7 +33,7 @@ rollout MLLVZImport "World import" width:284
     (
         button openWorld "Import LVZ + IMG..." width:220 height:34 align:#center
         button exportPlacements "Export placement edits to IMG..." width:220 height:30 align:#center
-        button editEffects "Edit 2D Effects..." width:220 height:27 align:#center
+        button editEffects "C2DEffects..." width:220 height:27 align:#center
     )
     group "Manhunt 2 world"
     (
@@ -101,11 +101,16 @@ rollout MLLVZImport "World import" width:284
                     if effects.checked do
                     (
                         local dtzPath = MLWorldFindDtz path
-                        if dtzPath != undefined do
+                        if dtzPath != undefined do try
                         (
                             local effectReport = MLReadWorldEffects dtzPath
                             format "MaxLeeds GAME.DTZ: % effects; %\n" effectReport[1] effectReport[2]
                             if effectReport[1] > 0 do status.text += "\n" + effectReport[1] as string + " unbound 2D effects"
+                        )
+                        catch
+                        (
+                            format "MaxLeeds: the LVZ / IMG world loaded, but GAME.DTZ effects failed: %\n" (getCurrentException())
+                            status.text += "\nGAME.DTZ effects could not be read"
                         )
                     )
                     redrawViews()

@@ -19,7 +19,8 @@ global MLWorldReadPs2Mesh, MLInflateChunk, MLWorldRows, MLReadWorld, MLReadWorld
 
 fn MLWorldFXProperty node field value =
 (
-    setUserProp node ("MaxLeedsFX" + field) (value as string)
+    local encoded = if (classof value) == Float then "f32:" + ((bit.floatAsInt value) as string) else value as string
+    setUserProp node ("MaxLeedsFX" + field) encoded
 )
 
 fn MLWorldFXValue node field defaultValue =
@@ -31,9 +32,226 @@ fn MLWorldFXValue node field defaultValue =
     (
         if (classof defaultValue) == String then raw as string
         else if (classof defaultValue) == Integer then raw as integer
-        else raw as float
+        else
+        (
+            local encoded = raw as string
+            if matchPattern encoded pattern:"f32:*" then
+                bit.intAsFloat ((substring encoded 5 (encoded.count - 4)) as integer)
+            else raw as float
+        )
     )
     catch (defaultValue)
+)
+
+fn MLWorldFXKindName kind =
+(
+    case kind of
+    (
+        0: "Light"
+        1: "Particle"
+        2: "Attractor"
+        3: "PedBehaviour"
+        default: "Unknown"
+    )
+)
+
+fn MLWorldFXSetNativeProperty node propertyName value =
+(
+    if node != undefined and isValidNode node and isProperty node propertyName do
+    (
+        try (setProperty node propertyName value) catch ()
+    )
+)
+
+fn MLWorldFXNativeColor node =
+(
+    if node != undefined and isValidNode node do
+    (
+        if isProperty node #rgb do
+        (
+            try (return (getProperty node #rgb)) catch ()
+        )
+        if isProperty node #color do
+        (
+            try (return (getProperty node #color)) catch ()
+        )
+    )
+    color (MLWorldFXValue node "Red" 255) (MLWorldFXValue node "Green" 255) (MLWorldFXValue node "Blue" 255)
+)
+
+fn MLWorldFXRememberLightNode marker =
+(
+    if isProperty marker #multiplier do
+        MLWorldFXProperty marker "PreviewIntensity" (bit.floatAsInt ((getProperty marker #multiplier) as float))
+    if isProperty marker #useFarAtten do
+        MLWorldFXProperty marker "PreviewAttenuation" (if getProperty marker #useFarAtten then 1 else 0)
+    if isProperty marker #farAttenStart do
+        MLWorldFXProperty marker "PreviewInnerRange" (bit.floatAsInt ((getProperty marker #farAttenStart) as float))
+    if isProperty marker #farAttenEnd do
+        MLWorldFXProperty marker "PreviewOuterRange" (bit.floatAsInt ((getProperty marker #farAttenEnd) as float))
+    true
+)
+
+fn MLWorldFXCaptureLightNode marker =
+(
+    if marker == undefined or not (isValidNode marker) do return false
+    if (MLWorldFXValue marker "Type" -1) != 0 do return false
+    if (getUserProp marker "MaxLeedsFXLightNode") != "true" do return false
+    local currentColor = MLWorldFXNativeColor marker
+    MLWorldFXProperty marker "Red" (currentColor.r as integer)
+    MLWorldFXProperty marker "Green" (currentColor.g as integer)
+    MLWorldFXProperty marker "Blue" (currentColor.b as integer)
+    if isProperty marker #multiplier do
+    (
+        local intensity = getProperty marker #multiplier
+        if (bit.floatAsInt (intensity as float)) != (MLWorldFXValue marker "PreviewIntensity" (bit.floatAsInt (intensity as float))) do
+            MLWorldFXProperty marker "Alpha" (amin 255 (amax 0 ((intensity * 255.0 + 0.5) as integer)))
+    )
+    if isProperty marker #useFarAtten do
+    (
+        local enabled = if getProperty marker #useFarAtten then 1 else 0
+        local previous = MLWorldFXValue marker "PreviewAttenuation" enabled
+        if enabled == 1 then
+        (
+            if isProperty marker #farAttenStart do
+            (
+                local value = getProperty marker #farAttenStart
+                if previous != enabled or (bit.floatAsInt (value as float)) != (MLWorldFXValue marker "PreviewInnerRange" (bit.floatAsInt (value as float))) do
+                    MLWorldFXProperty marker "LightInnerRange" value
+            )
+            if isProperty marker #farAttenEnd do
+            (
+                local value = getProperty marker #farAttenEnd
+                if previous != enabled or (bit.floatAsInt (value as float)) != (MLWorldFXValue marker "PreviewOuterRange" (bit.floatAsInt (value as float))) do
+                    MLWorldFXProperty marker "LightOuterRange" value
+            )
+        )
+        else if previous != enabled do
+        (
+            MLWorldFXProperty marker "LightInnerRange" 0.0
+            MLWorldFXProperty marker "LightOuterRange" 0.0
+        )
+    )
+    MLWorldFXRememberLightNode marker
+    true
+)
+
+fn MLWorldFXApplyLightNode marker =
+(
+    if marker == undefined or not (isValidNode marker) do return false
+    if (MLWorldFXValue marker "Type" -1) != 0 do return false
+    if (getUserProp marker "MaxLeedsFXLightNode") != "true" do return false
+    local rgb = color (MLWorldFXValue marker "Red" 255) (MLWorldFXValue marker "Green" 255) (MLWorldFXValue marker "Blue" 255)
+    local alpha = MLWorldFXValue marker "Alpha" 255
+    local outerRange = amax 0.0 (MLWorldFXValue marker "LightOuterRange" 0.0)
+    local innerRange = amax 0.0 (MLWorldFXValue marker "LightInnerRange" 0.0)
+    if innerRange > outerRange and outerRange > 0 do innerRange = outerRange
+
+    MLWorldFXSetNativeProperty marker #rgb rgb
+    MLWorldFXSetNativeProperty marker #color rgb
+    MLWorldFXSetNativeProperty marker #multiplier (alpha / 255.0)
+    MLWorldFXSetNativeProperty marker #useFarAtten (outerRange > 0.0)
+    MLWorldFXSetNativeProperty marker #farAttenStart innerRange
+    MLWorldFXSetNativeProperty marker #farAttenEnd outerRange
+    MLWorldFXSetNativeProperty marker #showFarAtten false
+    MLWorldFXSetNativeProperty marker #castShadows false
+    marker.wirecolor = rgb
+    MLWorldFXRememberLightNode marker
+    true
+)
+
+fn MLWorldFXCreateNode kind index position parentNode =
+(
+    local title = "C2DEffects_" + (MLWorldFXKindName kind) + "_" + (index + 1) as string
+    local node = undefined
+    if kind == 0 then
+    (
+        node = omniLight name:title pos:position
+        setUserProp node "MaxLeedsFXLightNode" "true"
+        -- Keep viewport lights off until explicitly enabled; retail maps may contain thousands.
+        MLWorldFXSetNativeProperty node #on false
+        MLWorldFXSetNativeProperty node #enabled false
+    )
+    else
+    (
+        node = point name:title pos:position size:1.5 cross:true box:false
+        setUserProp node "MaxLeedsFXLightNode" "false"
+    )
+    node.parent = parentNode
+    node.pos = position
+    setUserProp node "MaxLeeds2DFXType" (MLWorldFXKindName kind)
+    setUserProp node "MaxLeeds2DFXLocal" "true"
+    setUserProp node "MaxLeeds2DFXIndex" (index as string)
+    MLWorldFXProperty node "Index" index
+    MLWorldFXProperty node "Type" kind
+    node
+)
+
+fn MLWorldFXConvertNode marker newKind =
+(
+    if marker == undefined or not (isValidNode marker) do throw "Select an imported effect first."
+    if newKind < 0 or newKind > 3 do throw "Invalid 2D effect type."
+    if (MLWorldFXValue marker "Type" -1) == newKind do return marker
+
+    local index = MLWorldFXValue marker "Index" -1
+    if index < 0 do throw "The selected effect has no original descriptor index."
+    MLWorldFXCaptureLightNode marker
+    local origin = marker.parent
+    local position = marker.pos
+    local originalTransform = marker.transform
+    local descendants = marker.children as array
+    local selected = marker.isSelected
+    local hidden = marker.isHidden
+    local properties = getUserPropBuffer marker
+    local replacement = undefined
+    try
+    (
+        replacement = MLWorldFXCreateNode newKind index position origin
+        setUserPropBuffer replacement properties
+        MLWorldFXProperty replacement "Type" newKind
+        setUserProp replacement "MaxLeeds2DFXType" (MLWorldFXKindName newKind)
+        setUserProp replacement "MaxLeedsFXLightNode" (if newKind == 0 then "true" else "false")
+        replacement.transform = originalTransform
+        if newKind == 0 do MLWorldFXApplyLightNode replacement
+        for child in descendants do child.parent = replacement
+        if hidden do hide replacement
+        if selected do selectMore replacement
+        delete marker
+        replacement
+    )
+    catch
+    (
+        if replacement != undefined and isValidNode replacement do delete replacement
+        throw()
+    )
+)
+
+fn MLWorldFXRawBytes reader offset =
+(
+    local alphabet = "0123456789ABCDEF"
+    local result = ""
+    reader.seek offset
+    for index = 1 to 64 do
+    (
+        local value = reader.byte()
+        result += alphabet[(bit.shift value -4) + 1]
+        result += alphabet[(bit.and value 15) + 1]
+    )
+    result
+)
+
+fn MLWorldFXRawReadable marker =
+(
+    local original = getUserProp marker "MaxLeedsFXRawBytes"
+    if original == undefined or original.count != 128 do return "Original descriptor bytes unavailable."
+    local display = ""
+    for index = 0 to 63 do
+    (
+        local start = index * 2 + 1
+        display += (substring original start 2) + " "
+        if (mod (index + 1) 16) == 0 do display += "\r\n"
+    )
+    display
 )
 
 fn MLWorldFXRoots =
@@ -70,9 +288,18 @@ fn MLWorldFXMarkers root =
 fn MLInflateChunk inputPath =
 (
     local probe = MLReader()
-    probe.openFile inputPath
-    local magic = probe.atLong 0
-    probe.closeFile()
+    local magic = 0
+    try
+    (
+        probe.openFile inputPath
+        magic = probe.atLong 0
+        probe.closeFile()
+    )
+    catch
+    (
+        probe.closeFile()
+        throw()
+    )
     if (findItem #(0x57524C44, 0x41455241, 0x41524541, 0x47544147) magic) > 0 do return #(inputPath, false)
 
     local outputPath = MLTemporaryFile ((getDir #temp) + "\\MaxLeeds-inflated.bin")
@@ -84,7 +311,8 @@ fn MLInflateChunk inputPath =
         input = (dotNetClass "System.IO.File").OpenRead inputPath
         local first = input.ReadByte()
         local second = input.ReadByte()
-        if first != 0x78 or (mod (first * 256 + second) 31) != 0 do throw "The LVZ/DTZ stream is not zlib-compressed."
+        if first < 0 or second < 0 or (bit.and first 15) != 8 or first >= 128 or (mod (first * 256 + second) 31) != 0 or (bit.and second 32) != 0 do
+            throw "The LVZ/DTZ stream does not have a valid zlib header."
         inflater = dotNetObject "System.IO.Compression.DeflateStream" input ((dotNetClass "System.IO.Compression.CompressionMode").Decompress)
         output = (dotNetClass "System.IO.File").Create outputPath
         local buffer = (dotNetClass "System.Array").CreateInstance (dotNetClass "System.Byte") 65536
@@ -875,7 +1103,7 @@ fn MLReadWorld lvzPath imagePath game maxInstances loadTextures =
     )
 )
 
-fn MLReadWorldEffects dtzPath =
+fn MLReadWorldEffectsData dtzPath =
 (
     if dtzPath == undefined or not (doesFileExist dtzPath) do return #(0, "No GAME.DTZ supplied")
     local decompressed = #(dtzPath, false)
@@ -888,11 +1116,16 @@ fn MLReadWorldEffects dtzPath =
         if (reader.atLong 0) != 0x47544147 do throw "Not a retail GAME.DTZ resource image."
         local count = reader.atLong 0x54
         local pointer = reader.atLong 0x58
-        if count > 50000 or count < 1 or pointer < 0x20 or pointer + count * 64 > reader.length do throw "The 2D effect table is not in the expected PS2 layout."
-        effectsRoot = dummy name:"GAME.DTZ - unbound 2D effects" pos:[0,0,0] boxsize:[5,5,5]
+        if count < 1 or count > 50000 or pointer < 0x5C or pointer + count * 64 > reader.length do
+            throw "The 2D effect table is not in the expected PS2 layout."
+
+        effectsRoot = dummy name:"GAME.DTZ - C2DEffects" pos:[0,0,0] boxsize:[5,5,5]
         setUserProp effectsRoot "MaxLeedsEffectsLocal" "true"
         setUserProp effectsRoot "MaxLeedsEffectsSource" dtzPath
+        setUserProp effectsRoot "MaxLeedsEffectsCount" (count as string)
+        setUserProp effectsRoot "MaxLeedsEffectsTableOffset" (pointer as string)
         local imported = 0
+        local invalid = 0
         for index = 0 to count - 1 do
         (
             local offset = pointer + index * 64
@@ -900,98 +1133,110 @@ fn MLReadWorldEffects dtzPath =
             reader.seek (offset + 20)
             local kind = reader.byte()
             local marker = undefined
-            if kind <= 3 and (length position) < 100000 do try
+            if kind <= 3 and (length position) < 1000000 do
             (
-                local typeName = #("Light", "Particle", "Attractor", "PedBehaviour")[kind + 1]
-                marker = point name:("2DFX_" + typeName + "_" + (index + 1) as string) pos:position size:1.5 cross:true box:false
-                marker.parent = effectsRoot
-                setUserProp marker "MaxLeeds2DFXType" typeName
-                setUserProp marker "MaxLeeds2DFXLocal" "true"
-                setUserProp marker "MaxLeeds2DFXIndex" (index as string)
-                MLWorldFXProperty marker "Index" index
-                MLWorldFXProperty marker "Type" kind
-                reader.seek (offset + 16)
-                local red = reader.byte()
-                local green = reader.byte()
-                local blue = reader.byte()
-                local alpha = reader.byte()
-                MLWorldFXProperty marker "Red" red
-                MLWorldFXProperty marker "Green" green
-                MLWorldFXProperty marker "Blue" blue
-                MLWorldFXProperty marker "Alpha" alpha
-                marker.wirecolor = color red green blue
-                case kind of
+                try
                 (
-                    0:
+                    marker = MLWorldFXCreateNode kind index position effectsRoot
+                    MLWorldFXProperty marker "OriginalType" kind
+                    MLWorldFXProperty marker "RecordOffset" offset
+                    setUserProp marker "MaxLeedsFXRawBytes" (MLWorldFXRawBytes reader offset)
+                    reader.seek (offset + 16)
+                    local red = reader.byte()
+                    local green = reader.byte()
+                    local blue = reader.byte()
+                    local alpha = reader.byte()
+                    MLWorldFXProperty marker "Red" red
+                    MLWorldFXProperty marker "Green" green
+                    MLWorldFXProperty marker "Blue" blue
+                    MLWorldFXProperty marker "Alpha" alpha
+                    marker.wirecolor = color red green blue
+                    case kind of
                     (
-                        MLWorldFXProperty marker "LightDistance" (reader.atFloat (offset + 24))
-                        MLWorldFXProperty marker "LightOuterRange" (reader.atFloat (offset + 28))
-                        MLWorldFXProperty marker "LightSize" (reader.atFloat (offset + 32))
-                        MLWorldFXProperty marker "LightInnerRange" (reader.atFloat (offset + 36))
-                        reader.seek (offset + 40)
-                        MLWorldFXProperty marker "LightFlash" (reader.byte())
-                        MLWorldFXProperty marker "LightWet" (reader.byte())
-                        MLWorldFXProperty marker "LightFlare" (reader.byte())
-                        MLWorldFXProperty marker "LightShadow" (reader.byte())
-                        MLWorldFXProperty marker "LightFlags" (reader.byte())
-                        MLWorldFXProperty marker "LightCoronaPointer" (reader.atLong (offset + 48))
-                        MLWorldFXProperty marker "LightShadowPointer" (reader.atLong (offset + 52))
+                        0:
+                        (
+                            MLWorldFXProperty marker "LightDistance" (reader.atFloat (offset + 24))
+                            MLWorldFXProperty marker "LightOuterRange" (reader.atFloat (offset + 28))
+                            MLWorldFXProperty marker "LightSize" (reader.atFloat (offset + 32))
+                            MLWorldFXProperty marker "LightInnerRange" (reader.atFloat (offset + 36))
+                            reader.seek (offset + 40)
+                            MLWorldFXProperty marker "LightFlash" (reader.byte())
+                            MLWorldFXProperty marker "LightWet" (reader.byte())
+                            MLWorldFXProperty marker "LightFlare" (reader.byte())
+                            MLWorldFXProperty marker "LightShadow" (reader.byte())
+                            MLWorldFXProperty marker "LightFlags" (reader.byte())
+                            MLWorldFXProperty marker "LightCoronaPointer" (reader.atLong (offset + 48))
+                            MLWorldFXProperty marker "LightShadowPointer" (reader.atLong (offset + 52))
+                        )
+                        1:
+                        (
+                            MLWorldFXProperty marker "ParticleType" (reader.atLong (offset + 24))
+                            MLWorldFXProperty marker "ParticleX" (reader.atFloat (offset + 28))
+                            MLWorldFXProperty marker "ParticleY" (reader.atFloat (offset + 32))
+                            MLWorldFXProperty marker "ParticleZ" (reader.atFloat (offset + 36))
+                            MLWorldFXProperty marker "ParticleScale" (reader.atFloat (offset + 40))
+                        )
+                        2:
+                        (
+                            MLWorldFXProperty marker "AttractorX" (reader.atFloat (offset + 24))
+                            MLWorldFXProperty marker "AttractorY" (reader.atFloat (offset + 28))
+                            MLWorldFXProperty marker "AttractorZ" (reader.atFloat (offset + 32))
+                            reader.seek (offset + 36)
+                            MLWorldFXProperty marker "AttractorSubtype" (reader.byte())
+                            MLWorldFXProperty marker "AttractorProbability" (reader.byte())
+                        )
+                        3:
+                        (
+                            MLWorldFXProperty marker "PedDirectionX" (reader.atFloat (offset + 24))
+                            MLWorldFXProperty marker "PedDirectionY" (reader.atFloat (offset + 28))
+                            MLWorldFXProperty marker "PedDirectionZ" (reader.atFloat (offset + 32))
+                            MLWorldFXProperty marker "PedRotationX" (reader.atFloat (offset + 36))
+                            MLWorldFXProperty marker "PedRotationY" (reader.atFloat (offset + 40))
+                            MLWorldFXProperty marker "PedRotationZ" (reader.atFloat (offset + 44))
+                            reader.seek (offset + 48)
+                            MLWorldFXProperty marker "PedBehaviour" (reader.byte())
+                        )
                     )
-                    1:
-                    (
-                        MLWorldFXProperty marker "ParticleType" (reader.atLong (offset + 24))
-                        MLWorldFXProperty marker "ParticleX" (reader.atFloat (offset + 28))
-                        MLWorldFXProperty marker "ParticleY" (reader.atFloat (offset + 32))
-                        MLWorldFXProperty marker "ParticleZ" (reader.atFloat (offset + 36))
-                        MLWorldFXProperty marker "ParticleScale" (reader.atFloat (offset + 40))
-                    )
-                    2:
-                    (
-                        MLWorldFXProperty marker "AttractorX" (reader.atFloat (offset + 24))
-                        MLWorldFXProperty marker "AttractorY" (reader.atFloat (offset + 28))
-                        MLWorldFXProperty marker "AttractorZ" (reader.atFloat (offset + 32))
-                        reader.seek (offset + 36)
-                        MLWorldFXProperty marker "AttractorSubtype" (reader.byte())
-                        MLWorldFXProperty marker "AttractorProbability" (reader.byte())
-                    )
-                    3:
-                    (
-                        MLWorldFXProperty marker "PedDirectionX" (reader.atFloat (offset + 24))
-                        MLWorldFXProperty marker "PedDirectionY" (reader.atFloat (offset + 28))
-                        MLWorldFXProperty marker "PedDirectionZ" (reader.atFloat (offset + 32))
-                        MLWorldFXProperty marker "PedRotationX" (reader.atFloat (offset + 36))
-                        MLWorldFXProperty marker "PedRotationY" (reader.atFloat (offset + 40))
-                        MLWorldFXProperty marker "PedRotationZ" (reader.atFloat (offset + 44))
-                        reader.seek (offset + 48)
-                        MLWorldFXProperty marker "PedBehaviour" (reader.byte())
-                    )
+                    if kind == 0 do MLWorldFXApplyLightNode marker
+                    imported += 1
                 )
-                local addresses = ""
-                for entry in placement[6] do
-                    addresses += entry[1] as string + "," + entry[2].x as string + "," + entry[2].y as string + "," + entry[2].z as string + ";"
-                setUserProp node "MaxLeedsPlacementAddresses" addresses
-                imported += 1
+                catch
+                (
+                    if marker != undefined and isValidNode marker do delete marker
+                    invalid += 1
+                    format "MaxLeeds: skipped invalid effect %: %\n" index (getCurrentException())
+                )
             )
-            catch
-            (
-                if marker != undefined and isValidNode marker do delete marker
-                format "MaxLeeds: ignored invalid 2D effect descriptor %: %\n" index (getCurrentException())
-            )
+            else invalid += 1
         )
         reader.closeFile()
-        if decompressed[2] do deleteFile decompressed[1]
-        hide effectsRoot
+        if decompressed[2] and doesFileExist decompressed[1] do deleteFile decompressed[1]
         select effectsRoot
-        #(imported, "Local effect offsets (model binding unavailable)")
+        #(imported, "Local positions; " + invalid as string + " unsupported/invalid descriptors")
     )
     catch
     (
         local failure = getCurrentException() as string
         reader.closeFile()
         if decompressed[2] and doesFileExist decompressed[1] do deleteFile decompressed[1]
-        if effectsRoot != undefined and isValidNode effectsRoot do delete effectsRoot
+        if effectsRoot != undefined and isValidNode effectsRoot do
+        (
+            local children = effectsRoot.children as array
+            for child in children where isValidNode child do delete child
+            delete effectsRoot
+        )
         #(0, failure)
     )
+)
+
+fn MLReadWorldEffects dtzPath =
+(
+    local report = undefined
+    undo "MaxLeeds import C2DEffects" on
+    (
+        with redraw off (report = MLReadWorldEffectsData dtzPath)
+    )
+    report
 )
 
 fn MLWorldFXPatchByte stream offset value =
@@ -1002,7 +1247,7 @@ fn MLWorldFXPatchByte stream offset value =
 
 fn MLWorldFXPatchFloat stream offset value =
 (
-    if (abs value) > 1000000.0 do throw "An effect float is outside the supported editing range."
+    if value != value or (abs value) > 1000000.0 do throw "An effect float is outside the supported editing range."
     fseek stream offset #seek_set
     writeFloat stream value
 )
@@ -1032,10 +1277,16 @@ fn MLCompressChunk sourcePath destinationPath =
         local count = input.Read buffer 0 65536
         while count > 0 do
         (
-            for index = 0 to count - 1 do
+            for blockStart = 0 to count - 1 by 2048 do
             (
-                a = mod (a + ((buffer.GetValue index) as integer)) 65521
-                b = mod (b + a) 65521
+                local blockEnd = amin (count - 1) (blockStart + 2047)
+                for index = blockStart to blockEnd do
+                (
+                    a += (buffer.GetValue index) as integer
+                    b += a
+                )
+                a = mod a 65521
+                b = mod b 65521
             )
             compressor.Write buffer 0 count
             count = input.Read buffer 0 65536
@@ -1087,74 +1338,95 @@ fn MLSaveWorldEffects root destinationPath =
         if (reader.atLong 0) != 0x47544147 do throw "The source is not a GAME.DTZ resource image."
         local count = reader.atLong 0x54
         local table = reader.atLong 0x58
-        if count < 1 or count > 50000 or table < 0x20 or table + count * 64 > reader.length do throw "The source 2D effect table is invalid."
+        if count < 1 or count > 50000 or table < 0x5C or table + count * 64 > reader.length do throw "The source 2D effect table is invalid."
+        local importedCount = getUserProp root "MaxLeedsEffectsCount"
+        local importedTable = getUserProp root "MaxLeedsEffectsTableOffset"
+        if importedCount == undefined or importedTable == undefined do throw "The effects group has no original table metadata. Reload GAME.DTZ."
+        if count != (importedCount as integer) or table != (importedTable as integer) do
+            throw "The source effects table changed after import. Reload GAME.DTZ before saving."
+        local visited = #{}
+        visited.count = count
+        for marker in markers do
+        (
+            local index = MLWorldFXValue marker "Index" -1
+            if index < 0 or index >= count do throw ("An effect has an invalid descriptor index: " + index as string)
+            if visited[index + 1] do throw ("Duplicate descriptor index: " + index as string)
+            visited[index + 1] = true
+            local original = getUserProp marker "MaxLeedsFXRawBytes"
+            if original == undefined or original != (MLWorldFXRawBytes reader (table + index * 64)) do
+                throw ("Source descriptor " + index as string + " changed after import. Reload GAME.DTZ before saving.")
+        )
+        local rootInverse = inverse root.transform
         reader.closeFile()
         if not (copyFile unpacked[1] rawFile) do throw "Cannot create the editable GAME.DTZ image."
         stream = fopen rawFile "r+b"
         if stream == undefined do throw "Cannot open the temporary GAME.DTZ image for editing."
         local edited = 0
-        local visited = #()
         for marker in markers do
         (
             local index = MLWorldFXValue marker "Index" -1
-            if index >= 0 and index < count and (findItem visited index) == 0 do
+            local offset = table + index * 64
+            local kind = MLWorldFXValue marker "Type" 0
+            if kind < 0 or kind > 3 do throw ("Invalid 2D effect type at index " + index as string)
+            local originalKind = MLWorldFXValue marker "OriginalType" kind
+            if kind == 0 do MLWorldFXCaptureLightNode marker
+            if originalKind != kind do
             (
-                append visited index
-                local offset = table + index * 64
-                local kind = MLWorldFXValue marker "Type" 0
-                if kind < 0 or kind > 3 do throw ("Invalid 2D effect type at index " + index as string)
-                local position = marker.pos
-                MLWorldFXPatchFloat stream (offset + 0) position.x
-                MLWorldFXPatchFloat stream (offset + 4) position.y
-                MLWorldFXPatchFloat stream (offset + 8) position.z
-                MLWorldFXPatchByte stream (offset + 16) (MLWorldFXValue marker "Red" 255)
-                MLWorldFXPatchByte stream (offset + 17) (MLWorldFXValue marker "Green" 255)
-                MLWorldFXPatchByte stream (offset + 18) (MLWorldFXValue marker "Blue" 255)
-                MLWorldFXPatchByte stream (offset + 19) (MLWorldFXValue marker "Alpha" 255)
-                MLWorldFXPatchByte stream (offset + 20) kind
-                case kind of
-                (
-                    0:
-                    (
-                        MLWorldFXPatchFloat stream (offset + 24) (MLWorldFXValue marker "LightDistance" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "LightOuterRange" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "LightSize" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 36) (MLWorldFXValue marker "LightInnerRange" 0.0)
-                        MLWorldFXPatchByte stream (offset + 40) (MLWorldFXValue marker "LightFlash" 0)
-                        MLWorldFXPatchByte stream (offset + 41) (MLWorldFXValue marker "LightWet" 0)
-                        MLWorldFXPatchByte stream (offset + 42) (MLWorldFXValue marker "LightFlare" 0)
-                        MLWorldFXPatchByte stream (offset + 43) (MLWorldFXValue marker "LightShadow" 0)
-                        MLWorldFXPatchByte stream (offset + 44) (MLWorldFXValue marker "LightFlags" 0)
-                    )
-                    1:
-                    (
-                        MLWorldFXPatchLong stream (offset + 24) (MLWorldFXValue marker "ParticleType" 0)
-                        MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "ParticleX" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "ParticleY" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 36) (MLWorldFXValue marker "ParticleZ" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 40) (MLWorldFXValue marker "ParticleScale" 1.0)
-                    )
-                    2:
-                    (
-                        MLWorldFXPatchFloat stream (offset + 24) (MLWorldFXValue marker "AttractorX" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "AttractorY" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "AttractorZ" 0.0)
-                        MLWorldFXPatchByte stream (offset + 36) (MLWorldFXValue marker "AttractorSubtype" 0)
-                        MLWorldFXPatchByte stream (offset + 37) (MLWorldFXValue marker "AttractorProbability" 0)
-                    )
-                    3:
-                    (
-                        MLWorldFXPatchFloat stream (offset + 24) (MLWorldFXValue marker "PedDirectionX" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "PedDirectionY" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "PedDirectionZ" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 36) (MLWorldFXValue marker "PedRotationX" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 40) (MLWorldFXValue marker "PedRotationY" 0.0)
-                        MLWorldFXPatchFloat stream (offset + 44) (MLWorldFXValue marker "PedRotationZ" 0.0)
-                        MLWorldFXPatchByte stream (offset + 48) (MLWorldFXValue marker "PedBehaviour" 0)
-                    )
-                )
-                edited += 1
+                -- A class change must not retain fields or pointers from the old descriptor.
+                fseek stream (offset + 24) #seek_set
+                for byteIndex = 24 to 63 do writeByte stream 0 #unsigned
             )
+            local position = marker.pos * rootInverse
+            MLWorldFXPatchFloat stream (offset + 0) position.x
+            MLWorldFXPatchFloat stream (offset + 4) position.y
+            MLWorldFXPatchFloat stream (offset + 8) position.z
+            MLWorldFXPatchByte stream (offset + 16) (MLWorldFXValue marker "Red" 255)
+            MLWorldFXPatchByte stream (offset + 17) (MLWorldFXValue marker "Green" 255)
+            MLWorldFXPatchByte stream (offset + 18) (MLWorldFXValue marker "Blue" 255)
+            MLWorldFXPatchByte stream (offset + 19) (MLWorldFXValue marker "Alpha" 255)
+            MLWorldFXPatchByte stream (offset + 20) kind
+            case kind of
+            (
+                0:
+                (
+                    MLWorldFXPatchFloat stream (offset + 24) (MLWorldFXValue marker "LightDistance" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "LightOuterRange" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "LightSize" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 36) (MLWorldFXValue marker "LightInnerRange" 0.0)
+                    MLWorldFXPatchByte stream (offset + 40) (MLWorldFXValue marker "LightFlash" 0)
+                    MLWorldFXPatchByte stream (offset + 41) (MLWorldFXValue marker "LightWet" 0)
+                    MLWorldFXPatchByte stream (offset + 42) (MLWorldFXValue marker "LightFlare" 0)
+                    MLWorldFXPatchByte stream (offset + 43) (MLWorldFXValue marker "LightShadow" 0)
+                    MLWorldFXPatchByte stream (offset + 44) (MLWorldFXValue marker "LightFlags" 0)
+                )
+                1:
+                (
+                    MLWorldFXPatchLong stream (offset + 24) (MLWorldFXValue marker "ParticleType" 0)
+                    MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "ParticleX" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "ParticleY" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 36) (MLWorldFXValue marker "ParticleZ" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 40) (MLWorldFXValue marker "ParticleScale" 1.0)
+                )
+                2:
+                (
+                    MLWorldFXPatchFloat stream (offset + 24) (MLWorldFXValue marker "AttractorX" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "AttractorY" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "AttractorZ" 0.0)
+                    MLWorldFXPatchByte stream (offset + 36) (MLWorldFXValue marker "AttractorSubtype" 0)
+                    MLWorldFXPatchByte stream (offset + 37) (MLWorldFXValue marker "AttractorProbability" 0)
+                )
+                3:
+                (
+                    MLWorldFXPatchFloat stream (offset + 24) (MLWorldFXValue marker "PedDirectionX" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 28) (MLWorldFXValue marker "PedDirectionY" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 32) (MLWorldFXValue marker "PedDirectionZ" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 36) (MLWorldFXValue marker "PedRotationX" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 40) (MLWorldFXValue marker "PedRotationY" 0.0)
+                    MLWorldFXPatchFloat stream (offset + 44) (MLWorldFXValue marker "PedRotationZ" 0.0)
+                    MLWorldFXPatchByte stream (offset + 48) (MLWorldFXValue marker "PedBehaviour" 0)
+                )
+            )
+            edited += 1
         )
         fclose stream
         stream = undefined

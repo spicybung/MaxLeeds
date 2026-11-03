@@ -168,6 +168,7 @@ fn MLWriteManhuntPcEdits destination nodes =
                 local c = original.vertices[face.z as integer]
                 if a != b and b != c and c != a do (append sourceFaces face; append sourceIDs original.faceIDs[index])
             )
+            if original.faceIDs.count != original.faces.count do throw "The source model has an incomplete native face material stream."
             if snapshot.numfaces != sourceFaces.count do throw (node.name + ": face count changed. Position / UV export requires the original topology.")
             for index = 1 to sourceFaces.count do
             (
@@ -194,7 +195,10 @@ fn MLWriteManhuntPcEdits destination nodes =
                     for corner = 1 to 3 do
                     (
                         local vertex = face[corner] as integer
-                        local uv = meshop.getMapVert snapshot channel (mapFace[corner] as integer)
+                        local mapIndex = mapFace[corner] as integer
+                        if mapIndex < 1 or mapIndex > meshop.getNumMapVerts snapshot channel do
+                            throw (node.name + ": invalid UV vertex in channel " + channel as string)
+                        local uv = meshop.getMapVert snapshot channel mapIndex
                         if values[vertex] != undefined and (distance values[vertex] uv) > 0.00001 do throw (node.name + ": a UV seam needs new native vertices; position / UV export cannot split topology.")
                         values[vertex] = uv
                     )
@@ -213,11 +217,13 @@ fn MLWriteManhuntPcEdits destination nodes =
                 local row = header + 180 + record * 44
                 local count = reader.atShort (row + 24)
                 local first = reader.atShort (row + 28)
+                if mod count 3 != 0 or mod first 3 != 0 or first + count > original.faces.count * 3 do
+                    throw "The original material face range is invalid."
                 if count > 0 do
                 (
                     local minimum = [1.0e30,1.0e30,1.0e30]
                     local maximum = -minimum
-                    for faceIndex = first / 3 + 1 to (first + count) / 3 do
+                    for faceIndex = ((first / 3 + 1) as integer) to (((first + count) / 3) as integer) do
                         for corner = 1 to 3 do
                         (
                             local value = positions[original.faces[faceIndex][corner] as integer]

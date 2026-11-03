@@ -15,7 +15,40 @@
 -- You should have received a copy of the GNU General Public License
 -- along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-global MLReadTextures, MLWriteTextures, MLPspAddress, MLPs2Address, MLTextureColor, MLQuantize, MLQuantAxis, MLCompareColors, MLQuantCode
+global MLReadTextures, MLWriteTextures, MLTexturePlatform, MLTgaWriter, MLPspAddress, MLPs2Address, MLTextureColor, MLQuantize, MLQuantAxis, MLCompareColors, MLQuantCode
+struct MLTgaWriter
+(
+    writer = MLWriter(),
+    width = 0,
+    height = 0,
+    fn openFile path imageWidth imageHeight =
+    (
+        width = imageWidth
+        height = imageHeight
+        if width < 1 or height < 1 or width > 65535 or height > 65535 do throw "TGA dimensions are out of range."
+        writer.openFile path
+        writer.byte 0
+        writer.byte 0
+        writer.byte 2
+        writer.zeros 9
+        writer.short width
+        writer.short height
+        writer.byte 32
+        writer.byte 0x28
+    ),
+    fn writeRow pixels =
+    (
+        if pixels.count != width do throw "The TGA scanline has the wrong width."
+        for value in pixels do
+        (
+            writer.byte (amin 255 (amax 0 ((value.b + 0.5) as integer)))
+            writer.byte (amin 255 (amax 0 ((value.g + 0.5) as integer)))
+            writer.byte (amin 255 (amax 0 ((value.r + 0.5) as integer)))
+            writer.byte (amin 255 (amax 0 ((value.a + 0.5) as integer)))
+        )
+    ),
+    fn closeFile = writer.closeFile()
+)
 fn MLPspAddress x y stride = (((floor (y / 8.0)) as integer) * (stride / 16) + ((floor (x / 16.0)) as integer)) * 128 + (mod y 8) * 16 + mod x 16
 fn MLPs2Address x y logWidth =
 (
@@ -42,20 +75,45 @@ fn MLTextureColor reader offset depth format ps2 =
             default: throw "This 16-color-bit texture layout is not supported."
         )
     )
-    if ps2 do value.a = amin 255 (value.a * 255.0 / 128.0)
+    if ps2 do value.a = amin 255 (floor (value.a * 255.0 / 128.0))
     value
+)
+fn MLTexturePlatform reader requested =
+(
+    if requested == "PS2" or requested == "PSP" do return requested
+    local version = reader.atLong 0x20
+    if version == 0x106 do return "PSP"
+    if version == 0x8606 or version == 0xCC06 do return "PS2"
+    local slot = reader.atLong 0x2C
+    if slot < 0x30 or slot >= reader.length do throw "Cannot identify the texture platform. Select PS2 or PSP explicitly."
+    local header = reader.atLong (slot - 8)
+    if header < 0x20 or header + 16 > reader.length do throw "The texture header is invalid."
+    local flags = reader.atLong (header + 12)
+    local ps2Depth = MLBits flags 12 6
+    local ps2Width = MLBits flags 0 6
+    local ps2Height = MLBits flags 6 6
+    if ps2Width <= 12 and ps2Height <= 12 and (findItem #(4,8,16,32) ps2Depth) > 0 do return "PS2"
+    reader.seek (header + 10)
+    local pspWidth = reader.byte()
+    local pspHeight = reader.byte()
+    local pspDepth = reader.byte()
+    if pspWidth <= 12 and pspHeight <= 12 and (findItem #(4,8,16,32) pspDepth) > 0 do return "PSP"
+    throw "Cannot identify the texture platform. Select PS2 or PSP explicitly."
 )
 fn MLReadTextures path platform destination =
 (
     local reader = MLReader()
     local results = #()
-    local image = undefined
+    local output = MLTgaWriter()
+    local temporary = undefined
     try
     (
         reader.openFile path
         if (reader.text 0 4) != "xet" do throw "Choose a Stories XTX or CHK texture dictionary."
         local logicalEnd = reader.atLong 8
+        if logicalEnd < 0x30 or logicalEnd > reader.length do throw "The texture dictionary size is invalid."
         reader.check 0 logicalEnd
+        platform = MLTexturePlatform reader platform
         local slot = reader.atLong 0x2C
         local visited = #()
         local nodes = #()
@@ -65,10 +123,10 @@ fn MLReadTextures path platform destination =
             append visited slot
             if visited.count > 4096 do throw "Too many texture resources."
             local base = slot - 8
-            reader.check base 0x50
+            reader.check base (if platform == "PS2" then 0x60 else 0x50)
             local header = reader.atLong base
-            reader.check header 16
-            append nodes #(base, header, reader.text (base + 16) 32)
+            if header < 0x30 or header + 16 > logicalEnd do throw "The texture entry has an invalid header."
+            append nodes #(base, header, reader.text (base + 16) (if platform == "PS2" then 64 else 32))
             slot = reader.atLong (base + 12)
         )
         if nodes.count == 0 do throw "The texture dictionary is empty."
@@ -130,11 +188,12 @@ fn MLReadTextures path platform destination =
                     depth = MLBits flags 12 6
                     swizzle = bit.and (bit.shift flags -24) 1
                 )
-                if logWidth > 12 or logHeight > 12 or (findItem #(4,8,32) depth) == 0 do throw "This PS2 texture layout is not supported."
+                if logWidth > 12 or logHeight > 12 or (findItem #(4,8,16,32) depth) == 0 do throw "This PS2 texture layout is not supported."
                 width = bit.shift 1 logWidth
                 height = bit.shift 1 logHeight
+                if depth == 16 do colorFormat = 0x0100
                 paletteOffset = raster + ((ceil (width * height * depth / 8.0)) as integer)
-                local nextData = reader.length
+                local nextData = logicalEnd
                 for other in nodes do
                 (
                     for candidate in #(other[1], other[2], reader.atLong (other[2] + 8)) where candidate > raster do nextData = amin nextData candidate
@@ -143,22 +202,35 @@ fn MLReadTextures path platform destination =
             )
             local rowBytes = ((ceil (width * depth / 8.0)) as integer)
             local pitch = if stride > 0 then amax 16 rowBytes stride else rowBytes
-            reader.check raster (pitch * height)
+            if raster < 0 or raster + pitch * height > logicalEnd do throw "Texture raster lies outside the dictionary."
             local palette = #()
+            local hasTransparency = false
             if depth < 16 do
             (
-                reader.check paletteOffset ((bit.shift 1 depth) * 4)
-                for index = 0 to (bit.shift 1 depth) - 1 do append palette (MLTextureColor reader (paletteOffset + index * 4) 32 0 (platform == "PS2"))
+                if paletteOffset < 0 or paletteOffset + (bit.shift 1 depth) * 4 > logicalEnd do throw "Texture palette lies outside the dictionary."
+                for index = 0 to (bit.shift 1 depth) - 1 do
+                (
+                    local value = MLTextureColor reader (paletteOffset + index * 4) 32 0 (platform == "PS2")
+                    if value.a < 254.5 do hasTransparency = true
+                    append palette value
+                )
             )
-            local safeName = record[3]
-            for char in #("/", "\\", ":", "*", "?", "\"", "<", ">", "|") do safeName = substituteString safeName char "_"
-            if safeName == "" do safeName = "texture" + (results.count + 1) as string
+            local safeName = MLSafeTextureStem record[3]
             local imagePath = destination + "\\" + safeName + ".tga"
-            if doesFileExist imagePath do
+            local suffix = 2
+            local occupied = true
+            while occupied do
             (
-                if not (deleteFile imagePath) do throw "Cannot update the extracted texture file."
+                occupied = false
+                for existing in results where (toLower existing[2]) == (toLower imagePath) do occupied = true
+                if occupied do
+                (
+                    imagePath = destination + "\\" + safeName + "_" + suffix as string + ".tga"
+                    suffix += 1
+                )
             )
-            image = bitmap width height filename:imagePath
+            temporary = MLTemporaryFile imagePath
+            output.openFile temporary width height
             for y = 0 to height - 1 do
             (
                 local row = #()
@@ -167,6 +239,7 @@ fn MLReadTextures path platform destination =
                     local pixel = x + y * width
                     if platform == "PS2" and swizzle != 0 and depth < 16 do pixel = MLPs2Address x y logWidth
                     local byteOffset = ((floor (pixel * depth / 8.0)) as integer)
+                    if platform == "PS2" and swizzle != 0 and depth == 32 do byteOffset = MLPspAddress (x * 4) y (width * 4)
                     if platform == "PSP" then
                     (
                         local byteX = ((floor (x * depth / 8.0)) as integer)
@@ -180,14 +253,19 @@ fn MLReadTextures path platform destination =
                         if platform == "PS2" and depth == 8 do paletteIndex = bit.or (bit.and paletteIndex (bit.not 0x18)) (#(0,16,8,24)[(MLBits paletteIndex 3 2) + 1])
                         append row palette[paletteIndex + 1]
                     )
-                    else append row (MLTextureColor reader (raster + byteOffset) depth colorFormat (platform == "PS2"))
+                    else
+                    (
+                        local value = MLTextureColor reader (raster + byteOffset) depth colorFormat (platform == "PS2")
+                        if value.a < 254.5 do hasTransparency = true
+                        append row value
+                    )
                 )
-                setPixels image [0,y] row
+                output.writeRow row
             )
-            save image
-            close image
-            image = undefined
-            append results #(record[3], imagePath)
+            output.closeFile()
+            MLFinishFile temporary imagePath
+            temporary = undefined
+            append results #(record[3], imagePath, hasTransparency)
         )
         reader.closeFile()
         results
@@ -195,8 +273,9 @@ fn MLReadTextures path platform destination =
     catch
     (
         local reason = getCurrentException()
-        if image != undefined do close image
+        output.closeFile()
         reader.closeFile()
+        if temporary != undefined and doesFileExist temporary do deleteFile temporary
         throw()
     )
 )
@@ -210,6 +289,29 @@ fn MLQuantCode value =
 )
 fn MLQuantize pixels maximum =
 (
+    local exact = dotNetObject "System.Collections.Hashtable"
+    local exactPalette = #()
+    local exactIndices = #()
+    local fits = true
+    for value in pixels while fits do
+    (
+        local key = (value.r as integer) as string + ":" + (value.g as integer) as string + ":" + (value.b as integer) as string + ":" + (value.a as integer) as string
+        if not (exact.ContainsKey key) do
+        (
+            if exactPalette.count == maximum then fits = false
+            else
+            (
+                exact.Add key exactPalette.count
+                append exactPalette (copy value)
+            )
+        )
+        if fits do append exactIndices (exact.get_Item key)
+    )
+    if fits do
+    (
+        while exactPalette.count < maximum do append exactPalette (color 0 0 0 0)
+        return #(exactPalette, exactIndices)
+    )
     local table = dotNetObject "System.Collections.Hashtable"
     local samples = #()
     for value in pixels do
@@ -253,7 +355,15 @@ fn MLQuantize pixels maximum =
         local values = boxes[selected]
         MLQuantAxis = axis
         qsort values MLCompareColors
-        local halfway = ((floor (values.count / 2.0)) as integer)
+        local population = 0.0
+        for value in values do population += value[5]
+        local accumulated = 0.0
+        local halfway = 1
+        for sampleIndex = 1 to values.count - 1 while accumulated < population * 0.5 do
+        (
+            accumulated += values[sampleIndex][5]
+            halfway = sampleIndex
+        )
         boxes[selected] = for index = 1 to halfway collect values[index]
         append boxes (for index = halfway + 1 to values.count collect values[index])
     )
