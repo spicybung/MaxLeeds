@@ -23,7 +23,7 @@ struct MLReader
     length = 0,
     fn check offset count =
     (
-        if offset < 0 or count < 0 or offset + count > length do
+        if offset < 0 or count < 0 or offset > length or count > length - offset do
             throw "The file is truncated or contains an invalid offset."
         true
     ),
@@ -85,6 +85,7 @@ struct MLWriter
     fn tell = ftell stream,
     fn seek offset = fseek stream offset #seek_set,
     fn byte value = writeByte stream value #unsigned,
+    fn signedByte value = writeByte stream value #signed,
     fn short value = writeShort stream value #unsigned,
     fn signedShort value = writeShort stream value #signed,
     fn long value = writeLong stream value #unsigned,
@@ -131,12 +132,18 @@ struct MLWriter
     fn closeFile = (if stream != undefined do fclose stream; stream = undefined)
 )
 
-struct MLMaterial (name = "default", rgba = (color 255 255 255 255))
-struct MLPart (name = "model", vertices = #(), faces = #(), uv = #(), colors = #(), normals = #(), weights = #(), materialID = 1, faceIDs = #(), framePointer = 0)
+struct MLMaterial (name = "default", rgba = (color 255 255 255 255), twoSided = false, worldGame = "", worldFlags = 0)
+struct MLPart (name = "model", atomicPointer = 0, extraUV = #(), vertices = #(), faces = #(), uv = #(), colors = #(), normals = #(), weights = #(), materialID = 1, faceIDs = #(), framePointer = 0)
 struct MLFrame (pointer = 0, parentPointer = 0, name = "bone", localMatrix = (matrix3 1), worldMatrix = (matrix3 1), boneID = -1)
-struct MLModel (parts = #(), frames = #(), materials = #(), platform = "PSP", game = "VCS", modelID = -1, sourcePath = "")
+struct MLModel (name = "", parts = #(), frames = #(), materials = #(), platform = "PSP", game = "VCS", modelID = -1, sourcePath = "")
 
 global MLBits, MLAlign, MLColor, MLStripFaces, MLCreateMesh, MLCreateNormals, MLFinishFile, MLTemporaryFile
+global MLUserFlag
+fn MLUserFlag node key =
+(
+    local value = getUserProp node key
+    value != undefined and (value == true or (toLower (value as string)) == "true")
+)
 fn MLBits value first count = bit.and (bit.shift value (-first)) ((bit.shift 1 count) - 1)
 fn MLAlign value alignment = ((ceil (value as float / alignment)) as integer) * alignment
 fn MLColor value = color (MLBits value 0 8) (MLBits value 8 8) (MLBits value 16 8) (MLBits value 24 8)
@@ -177,8 +184,40 @@ fn MLCreateNormals node part =
     modifier.SelLevel = #Object
     true
 )
-fn MLCreateMesh part materials =
+fn MLCreateMaterial materials name =
 (
+    if materials.count == 0 do return undefined
+    local multi = multiMaterial numsubs:materials.count name:(name + " materials")
+    for index = 1 to materials.count do
+    (
+        local description = materials[index]
+        local material = standardMaterial name:description.name diffuse:description.rgba opacity:(description.rgba.a * 100.0 / 255.0) twoSided:description.twoSided
+        if description.worldGame != "" do setAppData material 0x4D4C0001 (description.worldGame + "|" + description.worldFlags as string)
+        multi.materialList[index] = material
+    )
+    multi
+)
+fn MLCreateMesh part materials sharedMaterial:undefined =
+(
+    part = copy part
+    local faces = #()
+    local faceIDs = #()
+    for index = 1 to part.faces.count do
+    (
+        local face = part.faces[index]
+        for corner = 1 to 3 do
+            if face[corner] < 1 or face[corner] > part.vertices.count do throw "Mesh face references an invalid vertex."
+        local a = part.vertices[face.x as integer]
+        local b = part.vertices[face.y as integer]
+        local c = part.vertices[face.z as integer]
+        if a != b and b != c and c != a do
+        (
+            append faces face
+            if part.faceIDs.count == part.faces.count do append faceIDs part.faceIDs[index]
+        )
+    )
+    part.faces = faces
+    part.faceIDs = faceIDs
     local node = mesh name:part.name vertices:part.vertices faces:part.faces
     try
     (
@@ -189,6 +228,17 @@ fn MLCreateMesh part materials =
         meshop.setNumMapFaces node 1 part.faces.count
         for index = 1 to part.uv.count do meshop.setMapVert node 1 index part.uv[index]
         for index = 1 to part.faces.count do meshop.setMapFace node 1 index part.faces[index]
+    )
+    for channelIndex = 1 to part.extraUV.count do
+    (
+        local channel = channelIndex + 1
+        local values = part.extraUV[channelIndex]
+        if values.count != part.vertices.count do throw "An additional UV channel has an incomplete vertex stream."
+        meshop.setMapSupport node channel true
+        meshop.setNumMapVerts node channel values.count
+        meshop.setNumMapFaces node channel part.faces.count
+        for index = 1 to values.count do meshop.setMapVert node channel index values[index]
+        for index = 1 to part.faces.count do meshop.setMapFace node channel index part.faces[index]
     )
     if part.colors.count == part.vertices.count do
     (
@@ -207,16 +257,7 @@ fn MLCreateMesh part materials =
         )
         node.showVertexColors = true
     )
-    if materials.count > 0 do
-    (
-        local multi = multiMaterial numsubs:materials.count name:(part.name + " materials")
-        for index = 1 to materials.count do
-        (
-            local description = materials[index]
-            multi.materialList[index] = standardMaterial name:description.name diffuse:description.rgba opacity:(description.rgba.a * 100.0 / 255.0)
-        )
-        node.material = multi
-    )
+    node.material = if sharedMaterial == undefined then MLCreateMaterial materials part.name else sharedMaterial
     for index = 1 to part.faces.count do setFaceMatID node index (if part.faceIDs.count == part.faces.count then part.faceIDs[index] else part.materialID)
     update node
     MLCreateNormals node part
@@ -239,8 +280,34 @@ fn MLTemporaryFile destination =
 fn MLFinishFile temporary destination =
 (
     if not doesFileExist temporary do throw "The writer did not create a file."
+
     local io = dotNetClass "System.IO.File"
-    if doesFileExist destination then io.Replace temporary destination undefined
-    else io.Move temporary destination
+    local token = ((dotNetClass "System.Guid").NewGuid()).ToString()
+    local backupFile = destination + "." + token + ".bak"
+
+    try
+    (
+        if doesFileExist destination then
+        (
+            io.Replace temporary destination backupFile
+        )
+        else
+        (
+            io.Move temporary destination
+        )
+    )
+    catch
+    (
+        local reason = getCurrentException() as string
+
+        if (not doesFileExist destination) and (doesFileExist backupFile) do
+        (
+            try (io.Move backupFile destination) catch ()
+        )
+
+        throw ("Cannot save " + destination + ": " + reason)
+    )
+
+    try (if doesFileExist backupFile do deleteFile backupFile) catch ()
     destination
 )

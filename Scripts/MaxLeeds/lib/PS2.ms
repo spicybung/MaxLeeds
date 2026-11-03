@@ -42,22 +42,32 @@ fn MLCommitPs2Strip part vertices uv colors normals weights =
     count
 )
 
-fn MLReadPs2Geometry reader geometry atomicName framePointer =
+fn MLReadPs2Geometry reader geometry atomicName framePointer mh2:false mobile:false =
 (
+    local positionFactor = if mobile then 0.00003051820313464149 else (1.0 / 32768.0)
+    local normalDivisor = if mobile or mh2 then 128.0 else 127.0
+    local descriptorBase = if mh2 then 0x50 else 0x40
     local globalHeader = geometry + 0x20
     reader.check globalHeader 0x40
     local packed = reader.atLong (globalHeader + 0x10)
     local partCount = MLBits packed 20 12
     local size = bit.and packed 0xFFFFF
     local firstPacket = reader.atShort (globalHeader + 0x1A)
-    if partCount < 1 or partCount > 512 or size < 0x40 or firstPacket < 0x40 do throw "The PS2 geometry header is invalid."
+    if partCount < 1 or partCount > 4095 or size < descriptorBase + partCount * 0x30 or firstPacket < descriptorBase + partCount * 0x30 do throw "The PS2 geometry header is invalid."
     reader.check globalHeader size
     local scale = reader.atPoint (globalHeader + 0x28)
     local position = reader.atPoint (globalHeader + 0x34)
     local parts = #()
+    local cycleLength = 1
+    local writeLength = 1
+    local rowValues = #(0,0,0,0)
+    local mask = 0
+    local mode = 0
+    local vifState = MLVifState()
+    vifState.clearMemory()
     for partIndex = 0 to partCount - 1 do
     (
-        local descriptor = globalHeader + 0x40 + partIndex * 0x30
+        local descriptor = globalHeader + descriptorBase + partIndex * 0x30
         reader.check descriptor 0x30
         local relative = reader.atLong (descriptor + 0x1C)
         local materialID = reader.atShort (descriptor + 0x22) + 1
@@ -73,31 +83,93 @@ fn MLReadPs2Geometry reader geometry atomicName framePointer =
             if (bit.and tag 0x70000000) != 0x60000000 do throw "The PS2 mesh contains an unknown DMA packet."
             local packetEnd = cursor + 16 + (bit.and tag 65535) * 16
             if packetEnd > partEnd do throw "The PS2 mesh DMA packet is truncated."
+            local resourceEnd = reader.length
+            reader.length = packetEnd
             reader.seek (cursor + 16)
             local vertices = #()
             local uv = #()
             local colors = #()
             local normals = #()
             local weights = #()
+            try
+            (
             while reader.tell() + 4 <= packetEnd do
             (
                 local word = reader.long()
                 local command = MLBits word 24 7
+                local unpackCommand = if (bit.and command 0x60) == 0x60 then (bit.and command 0x6F) else command
                 local count = MLBits word 16 8
                 if count == 0 do count = 256
-                case command of
+                local outputCount = count
+                local positionStream = vertices.count == 0
+                if (bit.and command 0x60) == 0x60 then
+                (
+                    vifState.row = rowValues
+                    vifState.mask = mask; vifState.mode = mode
+                    vifState.cycle = cycleLength; vifState.writes = writeLength
+                    local vectors = MLVifReadUnpack reader word vifState
+                    rowValues = vifState.row
+                    for vector in vectors do
+                    (
+                        case unpackCommand of
+                        (
+                            0x69:
+                            (
+                                MLVifRequire vector 3
+                                append vertices [vector[1] * scale.x * positionFactor + position.x,vector[2] * scale.y * positionFactor + position.y,vector[3] * scale.z * positionFactor + position.z]
+                            )
+                            0x68:
+                            (
+                                MLVifRequire vector 3
+                                local value = [MLVifFloat vector[1],MLVifFloat vector[2],MLVifFloat vector[3]]
+                                if positionStream then append vertices [value.x * scale.x + position.x,value.y * scale.y + position.y,value.z * scale.z + position.z]
+                                else append normals value
+                            )
+                            0x66: (MLVifRequire vector 2; append uv [vector[1] * uvScale.x / (if mh2 then 128.0 else 127.5),1.0 - vector[2] * uvScale.y / (if mh2 then 128.0 else 127.5),0])
+                            0x65: (MLVifRequire vector 2; append uv [vector[1] * uvScale.x / 32767.5,1.0 - vector[2] * uvScale.y / 32767.5,0])
+                            0x64: (MLVifRequire vector 2; append uv [(MLVifFloat vector[1]) * uvScale.x,1.0 - (MLVifFloat vector[2]) * uvScale.y,0])
+                            0x6A: (MLVifRequire vector 3; append normals ([vector[1],vector[2],vector[3]] / normalDivisor))
+                            0x6E: (MLVifRequire vector 4; append colors (color vector[1] vector[2] vector[3] (if mh2 then amin 255 (floor (vector[4] * 255.0 / 128.0)) else vector[4])))
+                            0x6F: (MLVifRequire vector 4; append colors (color (vector[1] * 255.0 / 248.0) (vector[2] * 255.0 / 248.0) (vector[3] * 255.0 / 248.0) (vector[4] * 255.0 / 128.0)))
+                            0x6C:
+                            (
+                                if vertices.count > 0 and outputCount == vertices.count and (mh2 or (bit.and word 1023) == 127) do
+                                (
+                                    MLVifRequire vector 4
+                                    local influences = #()
+                                    local total = 0.0
+                                    for value in vector do
+                                    (
+                                        local weight = bit.intAsFloat (bit.and value (bit.not 255))
+                                        local offset = bit.and value 255
+                                        if weight > 0 do
+                                        (
+                                            if (mod offset 4) != 0 or weight > 1.01 do throw "Invalid arithmetic VIF skin value."
+                                            append influences #(((offset / 4) as integer) + 1,weight)
+                                            total += weight
+                                        )
+                                    )
+                                    if total < 0.01 or total > 1.05 do throw "Invalid arithmetic VIF skin weights."
+                                    append weights influences
+                                )
+                            )
+                        )
+                    )
+                )
+                else
+                case unpackCommand of
                 (
                     0x00: ()
                     0x01:
                     (
-                        local cycleLength = bit.and word 255
-                        local writeLength = MLBits word 8 8
-                        if cycleLength != writeLength do throw "The PS2 vertex cycle is not a contiguous stream."
+                        cycleLength = bit.and word 255
+                        writeLength = MLBits word 8 8
+                        if writeLength == 0 do writeLength = 256
                     )
-                    0x02: ()
-                    0x03: ()
+                    0x02: (vifState.setOffset word)
+                    0x03: (vifState.baseAddress = bit.and word 1023)
                     0x04: ()
-                    0x05: ()
+                    0x05: (mode = bit.and word 3)
                     0x06: ()
                     0x07: ()
                     0x10: ()
@@ -105,6 +177,7 @@ fn MLReadPs2Geometry reader geometry atomicName framePointer =
                     0x13: ()
                     0x14:
                     (
+                        vifState.launch()
                         MLCommitPs2Strip part vertices uv colors normals weights
                         vertices = #()
                         uv = #()
@@ -114,6 +187,7 @@ fn MLReadPs2Geometry reader geometry atomicName framePointer =
                     )
                     0x15:
                     (
+                        vifState.launch()
                         MLCommitPs2Strip part vertices uv colors normals weights
                         vertices = #()
                         uv = #()
@@ -121,76 +195,22 @@ fn MLReadPs2Geometry reader geometry atomicName framePointer =
                         normals = #()
                         weights = #()
                     )
-                    0x17: ()
-                    0x20: (reader.check (reader.tell()) 4; reader.seek (reader.tell() + 4))
-                    0x30: (reader.check (reader.tell()) 16; reader.seek (reader.tell() + 16))
-                    0x31: (reader.check (reader.tell()) 16; reader.seek (reader.tell() + 16))
-                    0x79:
+                    0x17:
                     (
-                        if vertices.count != 0 do throw "The PS2 geometry starts another vertex strip before completing the previous one."
-                        reader.check (reader.tell()) (count * 6)
-                        for index = 1 to count do
-                        (
-                            local raw = [reader.signedShort(), reader.signedShort(), reader.signedShort()]
-                            append vertices [raw.x * scale.x / 32768.0 + position.x, raw.y * scale.y / 32768.0 + position.y, raw.z * scale.z / 32768.0 + position.z]
-                        )
-                        reader.seek (MLAlign (reader.tell()) 4)
+                        vifState.launch()
+                        MLCommitPs2Strip part vertices uv colors normals weights
+                        vertices = #(); uv = #(); colors = #(); normals = #(); weights = #()
                     )
-                    0x76:
-                    (
-                        reader.check (reader.tell()) (count * 2)
-                        for index = 1 to count do append uv [reader.byte() / 127.5 * uvScale.x, 1.0 - reader.byte() / 127.5 * uvScale.y, 0]
-                        reader.seek (MLAlign (reader.tell()) 4)
-                    )
-                    0x6F:
-                    (
-                        reader.check (reader.tell()) (count * 2)
-                        for index = 1 to count do
-                        (
-                            local packedColor = reader.short()
-                            append colors (color ((MLBits packedColor 0 5) * 255 / 31) ((MLBits packedColor 5 5) * 255 / 31) ((MLBits packedColor 10 5) * 255 / 31) (if (bit.and packedColor 0x8000) != 0 then 255 else 0))
-                        )
-                        reader.seek (MLAlign (reader.tell()) 4)
-                    )
-                    0x6A:
-                    (
-                        reader.check (reader.tell()) (count * 3)
-                        for index = 1 to count do append normals ([reader.signedByte(), reader.signedByte(), reader.signedByte()] / 127.0)
-                        reader.seek (MLAlign (reader.tell()) 4)
-                    )
-                    0x6C:
-                    (
-                        reader.check (reader.tell()) (count * 16)
-                        local address = bit.and word 0x3FF
-                        if vertices.count > 0 and count == vertices.count and address == 0x7F then
-                        (
-                            for vertexIndex = 1 to count do
-                            (
-                                local influences = #()
-                                local total = 0.0
-                                for channel = 1 to 4 do
-                                (
-                                    local value = reader.long()
-                                    local weight = bit.intAsFloat (bit.and value (bit.not 255))
-                                    local boneOffset = bit.and value 255
-                                    if weight > 0.0 do
-                                    (
-                                        if (mod boneOffset 4) != 0 do throw "The PS2 character contains an invalid skin bone offset."
-                                        if weight > 1.01 do throw "The PS2 character contains an invalid skin weight."
-                                        append influences #(((boneOffset / 4) as integer) + 1, weight)
-                                        total += weight
-                                    )
-                                )
-                                if total < 0.01 or total > 1.05 do throw "The PS2 character contains invalid vertex skin weights."
-                                append weights influences
-                            )
-                        )
-                        else reader.seek (reader.tell() + count * 16)
-                    )
+                    0x20: (mask = reader.long())
+                    0x30: (rowValues = #(reader.long(),reader.long(),reader.long(),reader.long()))
+                    0x31: (vifState.column = #(reader.long(),reader.long(),reader.long(),reader.long()))
                     default: throw ("Unknown PS2 VIF vertex command: " + command as string)
                 )
                 if reader.tell() > packetEnd do throw "A PS2 vertex attribute extends past its DMA packet."
             )
+            )
+            catch (reader.length = resourceEnd; throw())
+            reader.length = resourceEnd
             MLCommitPs2Strip part vertices uv colors normals weights
             cursor = packetEnd
         )

@@ -80,7 +80,7 @@ fn MLReadCollision path =
                     local maximum = reader.atPoint (boxesPointer + index * 48 + 16)
                     if minimum.x > maximum.x or minimum.y > maximum.y or minimum.z > maximum.z do throw "Collision box bounds are invalid."
                     local node = box name:(getFilenameFile path + "_box" + index as string) width:(maximum.x - minimum.x) length:(maximum.y - minimum.y) height:(maximum.z - minimum.z)
-                    node.pos = [(minimum.x + maximum.x) / 2, (minimum.y + maximum.y) / 2, minimum.z]
+                    node.pos = [(minimum.x + maximum.x) / 2, (minimum.y + maximum.y) / 2, (minimum.z + maximum.z) / 2]
                     node.boxMode = true
                     append created node
                     setUserProp node "MaxLeedsResourceID" resourceID
@@ -111,14 +111,13 @@ fn MLWriteCollision destination nodes =
     try
     (
         local models = #()
-        local usedIDs = #()
         for node in nodes where (superclassof node) == GeometryClass and (classof node) != BoneGeometry do
         (
-            if (getUserProp node "MaxLeedsCollision") == "Box" do throw "Native collision box export has not been ported. Select collision meshes only."
             local snapshot = snapshotAsMesh node
             append snapshots snapshot
-            if snapshot.numverts > 5462 do throw "A COL2 mesh can contain at most 5462 vertices. Split this mesh."
-            if snapshot.numfaces > 32767 do throw "A COL2 mesh can contain at most 32767 faces. Split this mesh."
+            local isBox = (getUserProp node "MaxLeedsCollision") == "Box"
+            if not isBox and snapshot.numverts > 5462 do throw "A COL2 mesh can contain at most 5462 vertices. Split this mesh."
+            if not isBox and snapshot.numfaces > 32767 do throw "A COL2 mesh can contain at most 32767 faces. Split this mesh."
             local points = for index = 1 to snapshot.numverts collect ((getVert snapshot index) * node.objectTransform)
             if points.count == 0 do throw "The selection contains an empty mesh."
             local minimum = copy points[1]
@@ -127,14 +126,39 @@ fn MLWriteCollision destination nodes =
             (
                 minimum[component] = amin minimum[component] point[component]
                 maximum[component] = amax maximum[component] point[component]
-                local quantized = point[component] * 128.0
-                if quantized < -32768 or quantized > 32767 do throw "Collision coordinates exceed the COL2 range."
+                if not isBox do
+                (
+                    local quantized = point[component] * 128.0
+                    if quantized < -32768 or quantized > 32767 do throw "Collision coordinates exceed the COL2 range."
+                )
             )
-            local resourceID = getUserProp node "MaxLeedsResourceID"
-            if resourceID == undefined or resourceID <= 0 do resourceID = 4096 + models.count
-            if (findItem usedIDs resourceID) != 0 do throw "Selected collision resources have the same ID. Export their boxes and mesh separately."
-            append usedIDs resourceID
-            append models #(node, snapshot, points, minimum, maximum, resourceID)
+            local sourceID = getUserProp node "MaxLeedsResourceID"
+            local resourceID = if sourceID == undefined then (4096 + models.count) else sourceID as integer
+            if resourceID < 0 or resourceID > 2147483647 do throw "The collision resource ID is invalid."
+            local modelIndex = 0
+            for index = 1 to models.count where models[index][1] == resourceID do modelIndex = index
+            if modelIndex == 0 do
+            (
+                append models #(resourceID, undefined, #(), copy minimum, copy maximum, #())
+                modelIndex = models.count
+            )
+            local model = models[modelIndex]
+            for component = 1 to 3 do
+            (
+                model[4][component] = amin model[4][component] minimum[component]
+                model[5][component] = amax model[5][component] maximum[component]
+            )
+            if isBox then
+            (
+                if model[6].count >= 65535 do throw "A collision resource contains too many boxes."
+                append model[6] #(minimum, maximum)
+            )
+            else
+            (
+                if model[2] != undefined do throw ("Collision resource " + resourceID as string + " has more than one triangle mesh. Join those meshes before export.")
+                model[2] = snapshot
+                model[3] = points
+            )
         )
         if models.count == 0 do throw "No geometry is selected."
         writer.openFile temporary
@@ -144,21 +168,41 @@ fn MLWriteCollision destination nodes =
         (
             local model = models[modelIndex]
             local snapshot = model[2]
+            local faceCount = if snapshot == undefined then 0 else snapshot.numfaces
             writer.align 16
             local header = writer.tell()
             writer.zeros 0x60
-            writer.align 2
-            local verticesPointer = writer.tell()
-            for point in model[3] do for component = 1 to 3 do writer.signedShort ((if point[component] < 0 then ceil (point[component] * 128.0 - 0.5) else floor (point[component] * 128.0 + 0.5)) as integer)
-            local trianglesPointer = writer.tell()
-            for faceIndex = 1 to snapshot.numfaces do
+            local boxesPointer = 0
+            if model[6].count > 0 do
             (
-                local face = getFace snapshot faceIndex
-                for corner = 1 to 3 do writer.signedShort (((face[corner] as integer) - 1) * 6)
-                local surface = (getFaceMatID snapshot faceIndex) - 1
-                if surface < 0 or surface > 255 do throw "Collision surface IDs must be between 1 and 256 in Max."
-                writer.byte surface
-                writer.byte 0
+                writer.align 16
+                boxesPointer = writer.tell()
+                for bounds in model[6] do
+                (
+                    writer.point bounds[1]
+                    writer.long 0
+                    writer.point bounds[2]
+                    writer.long 0
+                    writer.zeros 16
+                )
+            )
+            local verticesPointer = 0
+            local trianglesPointer = 0
+            if snapshot != undefined do
+            (
+                writer.align 2
+                verticesPointer = writer.tell()
+                for point in model[3] do for component = 1 to 3 do writer.signedShort ((if point[component] < 0 then ceil (point[component] * 128.0 - 0.5) else floor (point[component] * 128.0 + 0.5)) as integer)
+                trianglesPointer = writer.tell()
+                for faceIndex = 1 to snapshot.numfaces do
+                (
+                    local face = getFace snapshot faceIndex
+                    for corner = 1 to 3 do writer.signedShort (((face[corner] as integer) - 1) * 6)
+                    local surface = (getFaceMatID snapshot faceIndex) - 1
+                    if surface < 0 or surface > 255 do throw "Collision surface IDs must be between 1 and 256 in Max."
+                    writer.byte surface
+                    writer.byte 0
+                )
             )
             local end = writer.tell()
             local center = (model[4] + model[5]) / 2
@@ -167,12 +211,13 @@ fn MLWriteCollision destination nodes =
             writer.float (distance center model[5])
             writer.point model[4]; writer.float 0
             writer.point model[5]; writer.float 0
-            writer.short 0; writer.short 0; writer.short snapshot.numfaces
+            writer.short 0; writer.short model[6].count; writer.short faceCount
             writer.byte 0; writer.byte 0; writer.byte 4; writer.byte 0
             writer.seek end
-            writer.pointer (header + 0x4C) verticesPointer
-            writer.pointer (header + 0x50) trianglesPointer
-            writer.patchLong (0x20 + (modelIndex - 1) * 8) model[6]
+            if boxesPointer != 0 do writer.pointer (header + 0x44) boxesPointer
+            if verticesPointer != 0 do writer.pointer (header + 0x4C) verticesPointer
+            if trianglesPointer != 0 do writer.pointer (header + 0x50) trianglesPointer
+            writer.patchLong (0x20 + (modelIndex - 1) * 8) model[1]
             writer.pointer (0x24 + (modelIndex - 1) * 8) header
         )
         writer.align 4
