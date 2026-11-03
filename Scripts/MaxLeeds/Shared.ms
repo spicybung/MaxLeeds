@@ -17,9 +17,9 @@
 
 global MLRoot, MLVersion, MLRunTool
 MLRoot = getFilenamePath (getSourceFileName())
-MLVersion = "0.7.4.1"
+MLVersion = "0.1.3"
 if (maxVersion())[1] < 12000 do throw "MaxLeeds requires 3ds Max 2010 or later."
-for file in #("Binary.ms","Resource.ms","TEX.ms","MHTEX.ms","COL2.ms","VIF.ms","PS2.ms","MDL.ms","DFF.ms","TXD.ms","Manhunt.ms","ManhuntExport.ms","ManhuntTextureReplace.ms","ManhuntTextureEncode.ms","TextureCompression.ms","ManhuntRebuild.ms","ManhuntSkeleton.ms","WBL.ms","Scene.ms","ManhuntWorld.ms","ANIM.ms","IFP.ms","LVZ.ms","WorldExport.ms","Check.ms") do
+for file in #("Binary.ms","TEX.ms","COL2.ms","PS2.ms","MDL.ms","Manhunt.ms","WBL.ms","Scene.ms","Check.ms") do
 (
     local path = MLRoot + "lib\\" + file
     if not doesFileExist path do throw ("MaxLeeds is missing " + file + ". Reinstall the MZP.")

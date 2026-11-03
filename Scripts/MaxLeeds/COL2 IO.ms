@@ -53,7 +53,7 @@ rollout MLCOL2Export "Export COL2" width:214
     group "Selected objects"
     (
         button exportCollision "Export COL2" width:136 height:29 align:#center
-        label status "Select collision meshes / boxes" width:188 height:28 align:#center
+        label status "Select collision meshes" width:188 height:28 align:#center
     )
     on exportCollision pressed do
     (
@@ -65,7 +65,7 @@ rollout MLCOL2Export "Export COL2" width:214
             (
                 if (getFilenameType path) == "" do path += ".col2"
                 local count = MLWriteCollision path (selection as array)
-                status.text = "Exported " + count as string + " collision resources"
+                status.text = "Exported " + count as string + " objects"
             )
         )
         catch

@@ -1,0 +1,4 @@
+name "MaxLeeds"
+version 0.14
+run "install.ms"
+drop "install.ms"

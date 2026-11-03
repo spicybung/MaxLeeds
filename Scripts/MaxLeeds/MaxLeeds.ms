@@ -21,43 +21,31 @@ global MLToolsWindow
 try (closeRolloutFloater MLToolsWindow) catch ()
 try (destroyDialog MLTools) catch ()
 
-rollout MLToolMenu "File formats" width:284
+rollout MLToolMenu "Leeds tools" width:214
 (
-    group "Stories / Manhunt 2"
+    group "Models and textures"
     (
-        button mdlTools "Models (MDL)" width:232 height:32 align:#center
-        button animTools "Animations (ANIM / IFP)" width:232 height:32 align:#center
-        button texTools "Textures (CHK / XTX / TEX)" width:232 height:32 align:#center
-        button worldTools "World (LVZ / IMG / BSP)" width:232 height:32 align:#center
-        button effectsTools "2D Effects (GAME.DTZ)" width:232 height:32 align:#center
+        button mdlTools "MDL IO" width:136 height:28 align:#center
+        button texTools "TEX IO" width:136 height:28 align:#center
     )
-    group "Other formats"
+    group "Collision and world"
     (
-        button colTools "Collision (COL2)" width:232 height:30 align:#center
-        button wblTools "Chinatown Wars world (WBL)" width:232 height:30 align:#center
+        button colTools "COL2 IO" width:136 height:28 align:#center
+        button wblTools "WBL IO" width:136 height:28 align:#center
     )
     on mdlTools pressed do MLRunTool "MDL IO.ms"
-    on animTools pressed do MLRunTool "ANIM IO.ms"
     on texTools pressed do MLRunTool "TEX IO.ms"
-    on worldTools pressed do MLRunTool "LVZ IO.ms"
-    on effectsTools pressed do MLRunTool "2D Effects IO.ms"
     on colTools pressed do MLRunTool "COL2 IO.ms"
     on wblTools pressed do MLRunTool "WBL IO.ms"
 )
 
-rollout MLAbout "About" width:284
+rollout MLAbout "About" width:214
 (
     label title "MaxLeeds" align:#center
     label creator "by spicybung" align:#center
-    label version ("Version " + MLVersion + "  |  3ds Max 2010+") align:#center
-    button checkTools "Run built-in checks" width:232 height:28 align:#center
-    on checkTools pressed do
-    (
-        try (messageBox (MLCheckTools()) title:"MaxLeeds checks")
-        catch (messageBox (getCurrentException()) title:"MaxLeeds check failed")
-    )
+    label version "MAXScript - 3ds Max 2010+" align:#center
 )
 
-MLToolsWindow = newRolloutFloater "MaxLeeds" 316 505 50 75
+MLToolsWindow = newRolloutFloater "MaxLeeds" 248 420 50 75
 addRollout MLToolMenu MLToolsWindow rolledup:false
 addRollout MLAbout MLToolsWindow rolledup:true

@@ -21,44 +21,33 @@ global MLMDLWindow
 try (closeRolloutFloater MLMDLWindow) catch ()
 try (destroyDialog MLMDLTools) catch ()
 
-rollout MLMDLImport "Model import" width:284
+rollout MLMDLImport "Import MDL" width:214
 (
-    group "Source game"
+    group "Source"
     (
-        dropdownList game "Game:" items:#("Liberty City Stories", "Vice City Stories", "Manhunt 2") selection:1 width:250 align:#center
-        dropdownList platform "Platform:" items:#("PlayStation 2", "PSP", "Mobile (DFF)") selection:1 width:250 align:#center
+        dropdownList game "Game:" items:#("Liberty City Stories", "Vice City Stories", "Manhunt 2") selection:2 width:188 align:#center
+        dropdownList platform "Platform:" items:#("PS2", "PSP") selection:1 width:188 align:#center
     )
-    group "Import settings"
+    group "Import"
     (
-        checkbox loadTextures "Load matching textures" checked:true align:#left
-        checkbox showBones "Show skeleton after import" checked:true align:#left
-        button importModel "Import model..." width:225 height:32 align:#center
+        button importModel "Import MDL" width:136 height:29 align:#center
     )
-    label status "Ready" width:250 height:35 align:#center
+    label status "Ready" width:188 height:27 align:#center
 
     fn selectedGame = #("LCS", "VCS", "MH2")[game.selection]
-    fn selectedPlatform = #("PS2", "PSP", "Mobile")[platform.selection]
+    fn selectedPlatform = #("PS2", "PSP")[platform.selection]
 
     on game selected index do
     (
         platform.enabled = (index != 3)
-        if index != 1 and platform.selection == 3 do platform.selection = 1
-        if index == 3 then status.text = "Manhunt 2 PC / PS2 / PSP models" else status.text = "Ready"
-    )
-
-    on platform selected index do
-    (
-        if index == 3 do game.selection = 1
-        status.text = if index == 3 then "LCS Mobile DFF import" else "Ready"
+        if index == 3 then status.text = "Manhunt 2 - PC" else status.text = "Ready"
     )
 
     on importModel pressed do
     (
-        local mobile = game.selection == 1 and platform.selection == 3
-        local path = if mobile then getOpenFileName caption:"Import LCS Mobile DFF" types:"Mobile models (*.dff)|*.dff|" else getOpenFileName caption:"Import MDL / PMLC" types:"Models (*.mdl;*.pmlc)|*.mdl;*.pmlc|"
+        local path = getOpenFileName caption:"Import MDL" types:"Models (*.mdl)|*.mdl|"
         if path != undefined do
         (
-            status.text = "Ready"
             try
             (
                 local count = 0
@@ -66,43 +55,27 @@ rollout MLMDLImport "Model import" width:284
                 (
                     with redraw off
                     (
-                        local models = if mobile then MLReadMobileDff path else if game.selection == 3 then MLReadManhuntModels path else #(MLReadModel path (selectedGame()) (selectedPlatform()))
-                        local created = #()
-                        local roots = #()
-                        local assigned = 0
-                        try
+                        local model = if game.selection == 3 then MLReadManhunt path else MLReadModel path (selectedGame()) (selectedPlatform())
+                        count = MLBuildModel model
+                        if game.selection != 3 do
                         (
-                            for model in models do
+                            local importedNodes = MLSelectedFamily()
+                            try
                             (
-                                MLMergeModelParts model
-                                count += MLBuildModel model
-                                local importedNodes = MLSelectedFamily()
-                                join created importedNodes
-                                for node in importedNodes where (MLUserFlag node "MaxLeedsRoot") do append roots node
-                                if not showBones.checked do MLSetBonesVisible importedNodes false
-                                if loadTextures.checked do
-                                (
-                                    try
-                                    (
-                                        local textureCounts = if mobile then MLImportMobileImages path importedNodes else if game.selection == 3 then MLImportManhuntTextures path model.platform importedNodes else MLImportModelTextures path model.platform importedNodes
-                                        assigned += textureCounts[2]
-                                    )
-                                    catch (format "MaxLeeds: model imported; accompanying textures failed: %\n" (getCurrentException()))
-                                )
-                                if model.modelID >= 0 and model.modelID <= 65534 do MLMDLExport.modelID.value = model.modelID
+                                local textureCounts = MLImportModelTextures path (selectedPlatform()) importedNodes
+                                if textureCounts[2] > 0 do status.text = "Applied " + textureCounts[2] as string + " textures"
                             )
-                            select roots
-                            status.text = models.count as string + " models / " + count as string + " nodes; " + assigned as string + " textures"
+                            catch
+                            (
+                                format "MaxLeeds: accompanying textures could not be loaded: %\n" (getCurrentException())
+                                status.text = "Model loaded; textures unavailable"
+                            )
                         )
-                        catch
-                        (
-                            for node in created where isValidNode node do delete node
-                            throw()
-                        )
-                        if status.text == "Ready" do status.text = "Imported " + count as string + " nodes"
+                        if model.modelID >= 0 and model.modelID <= 65534 do MLMDLExport.modelID.value = model.modelID
                     )
                 )
                 redrawViews()
+                if status.text == "Ready" do status.text = "Imported " + count as string + " objects"
             )
             catch
             (
@@ -113,31 +86,31 @@ rollout MLMDLImport "Model import" width:284
     )
 )
 
-rollout MLMDLExport "Model export" width:284
+rollout MLMDLExport "Export MDL" width:214
 (
-    group "Destination game"
+    group "Destination"
     (
-        dropdownList game "Game:" items:#("Liberty City Stories", "Vice City Stories") selection:1 width:250 align:#center
-        dropdownList platform "Platform:" items:#("PlayStation 2", "PSP") selection:2 width:250 align:#center
+        dropdownList game "Game:" items:#("Liberty City Stories", "Vice City Stories") selection:2 width:188 align:#center
+        dropdownList platform "Platform:" items:#("PS2", "PSP") selection:2 width:188 align:#center
     )
     group "Model ID"
     (
         checkbox useImportedID "Use imported model ID" checked:true align:#left
-        spinner modelID "ID:" range:[0,65534,0] type:#integer fieldwidth:85 enabled:false align:#center
+        spinner modelID "ID:" range:[0,65534,0] type:#integer fieldwidth:65 enabled:false align:#center
     )
     group "Export"
     (
-        button exportModel "Export selected model..." width:225 height:32 align:#center
+        button exportModel "Export MDL" width:136 height:29 align:#center
     )
-    label status "Objects, weapons and skinned characters" width:250 height:30 align:#center
+    label status "Select a model to export" width:188 height:29 align:#center
 
     fn selectedGame = #("LCS", "VCS")[game.selection]
 
     fn updateOptions =
     (
         modelID.enabled = not useImportedID.checked
-        exportModel.enabled = true
-        status.text = "Objects, weapons and skinned characters"
+        exportModel.enabled = platform.selection == 2
+        if platform.selection == 1 then status.text = "PS2 export is not available" else status.text = "Select a model to export"
     )
 
     on MLMDLExport open do updateOptions()
@@ -152,7 +125,7 @@ rollout MLMDLExport "Model export" width:284
             local id = if useImportedID.checked then -1 else modelID.value
             if useImportedID.checked do
             (
-                for node in nodes where (MLUserFlag node "MaxLeedsRoot") do
+                for node in nodes where (getUserProp node "MaxLeedsRoot") == "true" do
                 (
                     local importedID = getUserProp node "MaxLeedsModelID"
                     if importedID != undefined do id = importedID as integer
@@ -163,10 +136,8 @@ rollout MLMDLExport "Model export" width:284
             if path != undefined do
             (
                 if (getFilenameType path) == "" do path += ".mdl"
-                local count = if platform.selection == 1 then MLWritePs2Object path nodes (selectedGame()) id else MLWritePspObject path nodes (selectedGame()) id
-                local parts = 0
-                for node in nodes where (superclassof node) == GeometryClass and (classof node) != BoneGeometry do parts += 1
-                status.text = "Exported " + count as string + " triangles / " + parts as string + " parts"
+                local count = MLWritePspObject path nodes (selectedGame()) id
+                status.text = "Exported " + count as string + " triangles"
             )
         )
         catch
@@ -177,98 +148,15 @@ rollout MLMDLExport "Model export" width:284
     )
 )
 
-rollout MLMDLManhuntEdits "Manhunt 2 PC edits" width:284
-(
-    group "Manhunt 2 PC edits"
-    (
-        button exportMh "Export positions / UVs..." width:225 height:30 align:#center
-        label mhHelp "Requires the original vertex and face topology." width:250 height:28 align:#center
-        checkbox rebuildSkeleton "Rebuild skeleton from current bind pose" checked:false align:#left tooltip:"Required when adding Skin to a previously rigid PC mesh. Use the current bind pose."
-        checkbox rebuildMaterials "Rebuild material slots from scene" checked:false align:#left
-        button rebuildMh "Rebuild edited PC meshes..." width:225 height:30 align:#center
-        label rebuildHelp "Topology, UVs, normals, colours and weights." width:250 height:28 align:#center
-        label mhScope "Both write mesh-local edits and retain source bones and material slots." width:250 height:38 align:#center
-    )
-    label status "" width:250 height:30 align:#center
-    on rebuildMh pressed do try
-    (
-        local path = getSaveFileName caption:"Rebuild Manhunt PC meshes" types:"Models (*.mdl)|*.mdl|"
-        if path != undefined do
-        (
-            if (getFilenameType path) == "" do path += ".mdl"
-            local report = MLWriteManhuntPcRebuild path (MLSelectedFamily()) rebuildMaterials:rebuildMaterials.checked rebuildSkeleton:rebuildSkeleton.checked
-            status.text = "Rebuilt " + report[1] as string + " meshes / " + report[3] as string + " faces"
-        )
-    ) catch (messageBox (getCurrentException()) title:"MaxLeeds Manhunt rebuild")
-
-    on exportMh pressed do try
-    (
-        local path = getSaveFileName caption:"Export Manhunt PC position / UV edits" types:"Models (*.mdl)|*.mdl|"
-        if path != undefined do
-        (
-            if (getFilenameType path) == "" do path += ".mdl"
-            local report = MLWriteManhuntPcEdits path (MLSelectedFamily())
-            status.text = "Exported " + report[1] as string + " meshes / " + report[2] as string + " vertices"
-        )
-    ) catch (messageBox (getCurrentException()) title:"MaxLeeds Manhunt export")
-
-)
-
-rollout MLMDLBones "Skeleton / skin" width:284
-(
-    label heading "Select a model or one of its parts" width:250 align:#center
-    group "Bone visibility"
-    (
-        button showSkeleton "Show bones" width:118 height:26 align:#left across:2
-        button hideSkeleton "Hide bones" width:118 height:26 align:#right
-    )
-    group "Skin weights"
-    (
-        button inspectWeights "Inspect skin" width:118 height:26 align:#left across:2
-        button reduceWeights "Limit to 4 influences" width:118 height:26 align:#right
-    )
-    label result "" width:250 height:43 align:#center
-
-    on showSkeleton pressed do
-    (
-        try (result.text = "Visible bones: " + (MLSetBonesVisible (MLSelectedFamily()) true) as string) catch (messageBox (getCurrentException()) title:"MaxLeeds")
-    )
-    on hideSkeleton pressed do
-    (
-        try (result.text = "Hidden bones: " + (MLSetBonesVisible (MLSelectedFamily()) false) as string) catch (messageBox (getCurrentException()) title:"MaxLeeds")
-    )
-    on inspectWeights pressed do
-    (
-        try
-        (
-            local report = MLAuditSkin (MLSelectedFamily())
-            result.text = report[1] as string + " skin meshes / " + report[2] as string + " vertices\n" + report[3] as string + " unweighted; " + report[4] as string + " >4 influences; " + report[5] as string + " not normalized"
-        )
-        catch (messageBox (getCurrentException()) title:"MaxLeeds")
-    )
-    on reduceWeights pressed do
-    (
-        try
-        (
-            local changed = 0
-            undo "MaxLeeds limit skin weights" on (changed = MLLimitSkinWeights (MLSelectedFamily()))
-            result.text = "Normalized / reduced " + changed as string + " vertices"
-        )
-        catch (messageBox (getCurrentException()) title:"MaxLeeds")
-    )
-)
-
-rollout MLMDLAbout "About" width:284
+rollout MLMDLAbout "About" width:214
 (
     label heading "MaxLeeds - MDL IO" align:#center
-    label games "LCS / VCS / Manhunt 2" align:#center
-    label source "PS2 / PSP MDL | Mobile DFF | MH2 PMLC" align:#center
+    label games "Liberty City Stories / Vice City Stories" align:#center
+    label source "PS2 / PSP model tools" align:#center
     label credit "spicybung" align:#center
 )
 
-MLMDLWindow = newRolloutFloater "MaxLeeds - Models" 316 760 320 90
+MLMDLWindow = newRolloutFloater "MDL IO" 248 575 320 90
 addRollout MLMDLImport MLMDLWindow rolledup:false
 addRollout MLMDLExport MLMDLWindow rolledup:false
-addRollout MLMDLBones MLMDLWindow rolledup:true
-addRollout MLMDLManhuntEdits MLMDLWindow rolledup:true
 addRollout MLMDLAbout MLMDLWindow rolledup:true

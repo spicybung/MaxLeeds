@@ -15,7 +15,7 @@
 -- You should have received a copy of the GNU General Public License
 -- along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
-global MLPspLayout, MLReadPspVector, MLReadFrames, MLReadMaterials, MLReadPspGeometry, MLReadModel, MLBuildModel, MLWritePspObject, MLWritePs2Object, MLWriteClumpModel, MLFrameBoneTarget, MLCreateFrameBone, MLGatherExportGeometry, MLWriteSkeleton, MLTrianglePalette, MLBuildModelStrips
+global MLPspLayout, MLReadPspVector, MLReadFrames, MLReadMaterials, MLReadPspGeometry, MLReadModel, MLBuildModel, MLWritePspObject, MLFrameBoneTarget, MLCreateFrameBone
 fn MLPspLayout flags =
 (
     local formats = #(MLBits flags 9 2, MLBits flags 0 2, MLBits flags 2 3, MLBits flags 5 2, MLBits flags 7 2)
@@ -64,14 +64,13 @@ fn MLReadFrames reader pointer platform game frames parentWorld visited =
     local localMatrix = reader.matrix (pointer + 0x10)
     local globalMatrix = reader.matrix (pointer + 0x50)
     local world = localMatrix * parentWorld
-    if game != "LCS" and game != "MH2" do
+    if game != "LCS" do
     (
         if (length globalMatrix.row1) >= 1.0e-8 and (length globalMatrix.row2) >= 1.0e-8 and (length globalMatrix.row3) >= 1.0e-8 do world = globalMatrix
     )
     local nameOffset = if platform == "PSP" or game == "VCS" then 0xA8 else 0xA4
     local namePointer = reader.atLong (pointer + nameOffset)
-    local name = if namePointer > 0 and namePointer < reader.length then reader.text namePointer (amin 128 (reader.length - namePointer)) else "frame" + (frames.count + 1) as string
-    if name == "" do name = "frame" + (frames.count + 1) as string
+    local name = if namePointer > 0 then reader.text namePointer (amin 128 (reader.length - namePointer)) else "bone" + frames.count as string
     append frames (MLFrame pointer:pointer parentPointer:parentPointer name:name localMatrix:localMatrix worldMatrix:world)
     local child = reader.atLong (pointer + 0x90)
     local sibling = reader.atLong (pointer + 0x94)
@@ -165,18 +164,6 @@ fn MLReadPspGeometry reader geometry atomicName framePointer =
     if total != vertexCount do throw "PSP strip counts do not match the geometry header."
     parts
 )
-fn MLMdlAtomicTag game platform =
-(
-    if game == "LCS" then 0x01050001 else if platform == "PS2" then 0x0004AA01 else 0x00041601
-)
-fn MLMdlClumpTag game platform =
-(
-    if game == "VCS" and platform == "PS2" then 0x0000AA02 else 0x00000002
-)
-fn MLMdlIsAtomic tag platform =
-(
-    (bit.and tag 255) == 1 or (platform == "PSP" and tag == 0x01F40400)
-)
 fn MLReadModel path game platform =
 (
     local reader = MLReader()
@@ -186,18 +173,15 @@ fn MLReadModel path game platform =
         reader.openFile path
         if (reader.text 0 4) != "ldm" do throw "Choose a Stories MDL file."
         local logicalEnd = reader.atLong 8
-        if logicalEnd < 0x28 do throw "The MDL logical size is invalid."
         reader.check 0 logicalEnd
-        reader.length = logicalEnd
         local candidates = #(0x20, reader.atLong 0x20, reader.atLong 0x24)
         local top = 0
         local atomics = #()
         local rootFrame = 0
         for candidate in candidates where top == 0 and candidate >= 0x20 and candidate + 0x34 <= logicalEnd do
         (
-            local tag = reader.atLong candidate
-            local kind = bit.and tag 255
-            if MLMdlIsAtomic tag platform then
+            local kind = bit.and (reader.atLong candidate) 255
+            if kind == 1 then
             (
                 local frame = reader.atLong (candidate + 4)
                 local geometry = reader.atLong (candidate + 20)
@@ -219,7 +203,7 @@ fn MLReadModel path game platform =
                         if visited.count > 2048 do throw "Too many model objects."
                         local atomic = link - 0x1C
                         reader.check atomic 0x34
-                        if not (MLMdlIsAtomic (reader.atLong atomic) platform) do throw "The model object list contains an invalid entry."
+                        if (bit.and (reader.atLong atomic) 255) != 1 do throw "The model object list contains an invalid entry."
                         append atomics atomic
                         link = reader.atLong (atomic + 28)
                     )
@@ -234,7 +218,6 @@ fn MLReadModel path game platform =
             local frame = reader.atLong (atomic + 4)
             local geometry = reader.atLong (atomic + 20)
             local hierarchy = reader.atLong (atomic + 44)
-            local traversal = #()
             model.modelID = reader.atShort (atomic + 40)
             if hierarchy != 0 do
             (
@@ -245,7 +228,7 @@ fn MLReadModel path game platform =
                 local anchor = reader.atLong (hierarchy + 0x34)
                 if count < 1 or count > 512 do throw "The bone count is invalid."
                 reader.check table (count * 8)
-                traversal = MLReadFrames reader anchor platform game #() (matrix3 1) #()
+                local traversal = MLReadFrames reader anchor platform game #() (matrix3 1) #()
                 for entryIndex = 0 to count - 1 do
                 (
                     local packed = reader.atLong (table + entryIndex * 8)
@@ -272,12 +255,11 @@ fn MLReadModel path game platform =
             local materialBase = model.materials.count
             for part in parts do
             (
-                part.atomicPointer = atomic
-                if part.materialID < 1 or part.materialID > materials.count do throw "A Stories geometry part refers to a missing material."
                 part.materialID += materialBase
-                for index = 1 to part.faceIDs.count do part.faceIDs[index] += materialBase
                 if part.weights.count > 0 and hierarchy != 0 do
                 (
+                    local anchor = reader.atLong (hierarchy + 0x34)
+                    local traversal = MLReadFrames reader anchor platform game #() (matrix3 1) #()
                     for influences in part.weights do for influence in influences do
                     (
                         if influence[1] > traversal.count do throw "The mesh refers to a missing bone."
@@ -307,19 +289,16 @@ fn MLFrameBoneTarget frame frames =
     local startPosition = frame.worldMatrix.row4
     local bestDistance = 0.0
     local bestPosition = undefined
-    local preferred = false
     for child in frames where child.parentPointer == frame.pointer do
     (
         local childPosition = child.worldMatrix.row4
         local childDistance = distance startPosition childPosition
         if childDistance > 0.00001 do
         (
-            local actualBone = child.boneID >= 0
-            if bestPosition == undefined or (actualBone and not preferred) or (actualBone == preferred and childDistance < bestDistance) do
+            if bestPosition == undefined or childDistance < bestDistance do
             (
                 bestPosition = childPosition
                 bestDistance = childDistance
-                preferred = actualBone
             )
         )
     )
@@ -336,13 +315,6 @@ fn MLCreateFrameBone frame frames =
 (
     local world = frame.worldMatrix
     local startPosition = world.row4
-    if frame.boneID < 0 do
-    (
-        local helper = point name:frame.name pos:startPosition size:0.015 cross:true box:false
-        helper.transform = world
-        helper.isHidden = true
-        return helper
-    )
     local endPosition = MLFrameBoneTarget frame frames
     local xAxis = world.row1
     local zAxis = world.row3
@@ -400,7 +372,7 @@ fn MLBuildModel model =
     local created = #()
     try
     (
-        local root = dummy name:(if model.name == "" then getFilenameFile model.sourcePath else model.name)
+        local root = dummy name:(getFilenameFile model.sourcePath)
         root.boxsize = [0.1,0.1,0.1]
         append created root
         setUserProp root "MaxLeedsRoot" true
@@ -408,7 +380,6 @@ fn MLBuildModel model =
         setUserProp root "MaxLeedsPlatform" model.platform
         setUserProp root "MaxLeedsModelID" model.modelID
         setUserProp root "MaxLeedsSource" model.sourcePath
-        if model.game == "MH2" do setUserProp root "MaxLeedsSourceDigest" (MLFileDigest model.sourcePath)
         local frameNodes = #()
         for frame in model.frames do
         (
@@ -434,25 +405,20 @@ fn MLBuildModel model =
         )
         for index = 1 to model.frames.count do
         (
-            if model.frames[index].boneID >= 0 do
-            (
-                frameNodes[index].setBoneEnable true 0
-                frameNodes[index].boneAutoAlign = false
-                frameNodes[index].boneScaleType = #none
-            )
-            else hide frameNodes[index]
+            frameNodes[index].setBoneEnable true 0
+            frameNodes[index].boneAutoAlign = false
+            frameNodes[index].boneScaleType = #none
+            if model.frames[index].boneID < 0 do hide frameNodes[index]
         )
         for index = 1 to model.frames.count do
         (
             if (distance frameNodes[index].pos model.frames[index].worldMatrix.row4) > 0.001 do
                 throw ("3ds Max moved imported bone " + model.frames[index].name + ". The import was cancelled.")
         )
-        local sharedMaterial = MLCreateMaterial model.materials root.name
         for part in model.parts do
         (
-            local node = MLCreateMesh part model.materials sharedMaterial:sharedMaterial
+            local node = MLCreateMesh part model.materials
             append created node
-            setUserProp node "MaxLeedsAtomic" part.atomicPointer
             local frameIndex = 0
             for index = 1 to model.frames.count where model.frames[index].pointer == part.framePointer do frameIndex = index
             -- Skin meshes cannot be parented to a weighted bone: that would apply its transform twice.
@@ -467,18 +433,9 @@ fn MLBuildModel model =
                 select node
                 setCommandPanelTaskMode #modify
                 modPanel.setCurrentObject modifier
-                local lastBoneIndex = 0
-                for index = 1 to frameNodes.count where model.frames[index].boneID >= 0 do lastBoneIndex = index
-                if lastBoneIndex == 0 do throw "The character does not contain valid animation bones."
-                for index = 1 to frameNodes.count where model.frames[index].boneID >= 0 do
+                for index = 1 to frameNodes.count do
                 (
-                    skinOps.addBone modifier frameNodes[index] (if index == lastBoneIndex then 1 else 0)
-                )
-                local skinBoneMap = for index = 1 to frameNodes.count collect 0
-                for index = 1 to frameNodes.count where model.frames[index].boneID >= 0 do
-                (
-                    for skinIndex = 1 to (skinOps.GetNumberBones modifier) where (skinOps.GetBoneName modifier skinIndex 0) == frameNodes[index].name do skinBoneMap[index] = skinIndex
-                    if skinBoneMap[index] == 0 do throw ("Skin did not register bone " + frameNodes[index].name)
+                    skinOps.addBone modifier frameNodes[index] (if index == frameNodes.count then 1 else 0)
                 )
                 if isProperty modifier #weightAllVertices do modifier.weightAllVertices = false
                 for vertex = 1 to part.weights.count do
@@ -488,14 +445,12 @@ fn MLBuildModel model =
                     for influence in part.weights[vertex] do
                     (
                         if influence[1] < 1 or influence[1] > frameNodes.count do throw "A skin weight refers to a missing bone."
-                        if model.frames[influence[1]].boneID < 0 do throw "A skin weight refers to a helper frame rather than an animation bone."
                         if influence[2] > 0.0 do
                         (
-                            local skinIndex = skinBoneMap[influence[1]]
-                            local existing = findItem boneIDs skinIndex
+                            local existing = findItem boneIDs influence[1]
                             if existing == 0 then
                             (
-                                append boneIDs skinIndex
+                                append boneIDs influence[1]
                                 append weights influence[2]
                             )
                             else weights[existing] += influence[2]
@@ -505,17 +460,19 @@ fn MLBuildModel model =
                     -- Replace all influences in one operation, then preserve the game's weights.
                     skinOps.ReplaceVertexWeights modifier vertex boneIDs weights
                     skinOps.unNormalizeVertex modifier vertex true
-                    local actual = for index = 1 to boneIDs.count collect 0.0
+                    local actual = for index = 1 to frameNodes.count collect 0.0
                     for index = 1 to (skinOps.GetVertexWeightCount modifier vertex) do
                     (
                         local bone = skinOps.GetVertexWeightBoneID modifier vertex index
-                        local slot = findItem boneIDs bone
-                        local value = skinOps.GetVertexWeight modifier vertex index
-                        if slot > 0 then actual[slot] += value
-                        else if (abs value) > 0.0001 do throw "Skin added an unexpected bone influence."
+                        if bone >= 1 and bone <= actual.count do
+                            actual[bone] += skinOps.GetVertexWeight modifier vertex index
                     )
                     for index = 1 to actual.count do
-                        if (abs (actual[index] - weights[index])) > 0.0001 do throw "Skin did not preserve the source bone weights."
+                    (
+                        local expectedIndex = findItem boneIDs index
+                        local expected = if expectedIndex > 0 then weights[expectedIndex] else 0.0
+                        if (abs (actual[index] - expected)) > 0.0001 do throw "Skin did not preserve the source bone weights."
+                    )
                 )
             )
         )
@@ -530,101 +487,43 @@ fn MLBuildModel model =
         throw()
     )
 )
-fn MLMdlFrameOrder frameNodes =
+fn MLWritePspObject destination nodes game modelID =
 (
-    local parents = #()
-    for index = 1 to frameNodes.count do
-    (
-        local node = frameNodes[index]
-        if (findItem frameNodes node) != index do throw "The MDL frame selection contains a duplicate node."
-        local ancestor = node.parent
-        local parentIndex = 0
-        while ancestor != undefined and parentIndex == 0 do
-        (
-            parentIndex = findItem frameNodes ancestor
-            ancestor = ancestor.parent
-        )
-        append parents parentIndex
-    )
-    local pending = #()
-    for index = frameNodes.count to 1 by -1 where parents[index] == 0 do append pending index
-    local order = #()
-    while pending.count > 0 do
-    (
-        local index = pending[pending.count]
-        deleteItem pending pending.count
-        append order index
-        for child = frameNodes.count to 1 by -1 where parents[child] == index do append pending child
-    )
-    if order.count != frameNodes.count do throw "The MDL frame hierarchy contains a cycle."
-    order
-)
-
-fn MLGatherExportGeometry nodes =
-(
-    local triangles = #()
-    local materials = #()
-    local materialNodes = #()
+    if modelID < 0 or modelID > 65534 do throw "Enter the game's model ID, or import its original model first."
+    local writer = MLWriter()
+    local temporary = MLTemporaryFile destination
     local snapshots = #()
-    local referenceRoot = undefined
-    local rootCount = 0
-    local frameNodes = #()
-    local hasSkin = false
-    local hasRigid = false
     try
     (
-        for node in nodes where (MLUserFlag node "MaxLeedsRoot") do
+        local triangles = #()
+        local materials = #()
+        local materialNodes = #()
+        local referenceRoot = undefined
+        local rootCount = 0
+        for node in nodes where (getUserProp node "MaxLeedsRoot") == "true" do
         (
             referenceRoot = node
             rootCount += 1
         )
         if rootCount > 1 do throw "Select one model root for MDL export."
         local rootInverse = if referenceRoot != undefined then inverse referenceRoot.transform else matrix3 1
-        for node in nodes where isValidNode node do
-        (
-            if (getUserProp node "MaxLeedsFrame") != undefined or (classof node) == BoneGeometry do append frameNodes node
-        )
         for node in nodes where (superclassof node) == GeometryClass and (classof node) != BoneGeometry do
         (
-            local skinModifier = undefined
-            for modifier in node.modifiers where (classof modifier) == Skin do skinModifier = modifier
-            if skinModifier != undefined then hasSkin = true else hasRigid = true
-            if skinModifier == undefined do
-            (
-                local ancestor = node.parent
-                local originalFrame = false
-                while ancestor != undefined and not originalFrame do
-                (
-                    if (getUserProp ancestor "MaxLeedsFrame") != undefined do originalFrame = true
-                    ancestor = ancestor.parent
-                )
-                if not originalFrame and (findItem frameNodes node) == 0 do append frameNodes node
-            )
-            if skinModifier != undefined and frameNodes.count == 0 do throw "The selected skinned mesh has no bone hierarchy."
-            local snapshot = MLSnapshotWithoutSkin node
+            for modifier in node.modifiers where (classof modifier) == Skin do throw "Character model export has not been ported. Use Object / weapon export for an unskinned mesh."
+            local snapshot = snapshotAsMesh node
             append snapshots snapshot
-            if skinModifier != undefined and (skinOps.GetNumberVertices skinModifier) != snapshot.numverts do throw "A modifier above Skin changed vertex topology. Move topology edits below Skin before exporting MDL."
-            local objectMatrix = node.objectTransform * rootInverse
-            local inverseMatrix = inverse objectMatrix
-            local normalMatrix = matrix3 [inverseMatrix.row1.x,inverseMatrix.row2.x,inverseMatrix.row3.x] [inverseMatrix.row1.y,inverseMatrix.row2.y,inverseMatrix.row3.y] [inverseMatrix.row1.z,inverseMatrix.row2.z,inverseMatrix.row3.z] [0,0,0]
             for faceIndex = 1 to snapshot.numfaces do
             (
                 local face = getFace snapshot faceIndex
                 local materialID = getFaceMatID snapshot faceIndex
-                local material = node.material
-                if (classof material) == MultiMaterial do
-                (
-                    local slots = for index = 1 to material.materialIDList.count where material.materialIDList[index] == materialID collect index
-                    if slots.count != 1 do throw "Each used MDL face material ID must resolve to one Multi/Sub-Object slot."
-                    material = material.materialList[slots[1]]
-                )
+                local material = if (classof node.material) == MultiMaterial then node.material.materialList[materialID] else node.material
                 local slot = findItem materialNodes material
                 if slot == 0 do
                 (
                     append materialNodes material
                     local name = if material != undefined then material.name else "default"
                     if material != undefined and isProperty material #diffuseMap and material.diffuseMap != undefined and isProperty material.diffuseMap #filename do name = getFilenameFile material.diffuseMap.filename
-                    if name.count > 31 do throw ("Texture name exceeds 31 characters: " + name)
+                    if name.count > 31 do throw "PSP texture names must be at most 31 characters."
                     local rgba = if material != undefined then copy material.diffuse else color 255 255 255 255
                     rgba.a = if material != undefined then material.opacity * 255.0 / 100.0 else 255
                     append materials (MLMaterial name:name rgba:rgba)
@@ -634,10 +533,12 @@ fn MLGatherExportGeometry nodes =
                 local colorFace = if meshop.getMapSupport snapshot 0 then meshop.getMapFace snapshot 0 faceIndex else [0,0,0]
                 local alphaFace = if meshop.getMapSupport snapshot -2 then meshop.getMapFace snapshot -2 faceIndex else [0,0,0]
                 local faceNormals = meshop.getFaceRNormals snapshot faceIndex
+                local inverseMatrix = inverse (node.objectTransform * rootInverse)
+                local normalMatrix = matrix3 [inverseMatrix.row1.x,inverseMatrix.row2.x,inverseMatrix.row3.x] [inverseMatrix.row1.y,inverseMatrix.row2.y,inverseMatrix.row3.y] [inverseMatrix.row1.z,inverseMatrix.row2.z,inverseMatrix.row3.z] [0,0,0]
                 local corners = #()
                 for corner = 1 to 3 do
                 (
-                    local point = (getVert snapshot (face[corner] as integer)) * objectMatrix
+                    local point = (getVert snapshot (face[corner] as integer)) * node.objectTransform * rootInverse
                     local uv = if uvFace[corner] > 0 then meshop.getMapVert snapshot 1 (uvFace[corner] as integer) else [0,0,0]
                     local rgba = color 255 255 255 255
                     if colorFace[corner] > 0 do
@@ -647,315 +548,15 @@ fn MLGatherExportGeometry nodes =
                     )
                     if alphaFace[corner] > 0 do rgba.a = (meshop.getMapVert snapshot -2 (alphaFace[corner] as integer)).x * 255
                     local normal = normalize (faceNormals[corner] * normalMatrix)
-                    local influences = #()
-                    if skinModifier != undefined do
-                    (
-                        local vertexID = face[corner] as integer
-                        for weightIndex = 1 to (skinOps.GetVertexWeightCount skinModifier vertexID) do
-                        (
-                            local weight = skinOps.GetVertexWeight skinModifier vertexID weightIndex
-                            if weight > 0 do
-                            (
-                                local boneID = skinOps.GetVertexWeightBoneID skinModifier vertexID weightIndex
-                                local boneName = skinOps.GetBoneName skinModifier boneID 0
-                                local frameID = 0
-                                for frameIndex = 1 to frameNodes.count where frameNodes[frameIndex].name == boneName do
-                                (
-                                    if frameID != 0 do throw ("MDL Skin bone name is ambiguous: " + boneName)
-                                    frameID = frameIndex
-                                )
-                                if frameID == 0 do throw ("Skin bone " + boneName + " is outside the selected model hierarchy.")
-                                append influences #(frameID, weight)
-                            )
-                        )
-                        if influences.count == 0 do throw ("Mesh " + node.name + " has an unweighted vertex " + vertexID as string)
-                        if influences.count > 4 do
-                        (
-                            qsort influences MLWeightGreater
-                            while influences.count > 4 do deleteItem influences influences.count
-                        )
-                        local total = 0.0
-                        for influence in influences do total += influence[2]
-                        if total <= 0 do throw "A skin vertex has zero weight."
-                        for influence in influences do influence[2] /= total
-                    )
-                    append corners #(point,uv,rgba,normal,influences)
+                    append corners #(point,uv,rgba,normal)
                 )
-                if (dot (cross objectMatrix.row1 objectMatrix.row2) objectMatrix.row3) < 0 do
-                (
-                    local swapped = corners[2]
-                    corners[2] = corners[3]
-                    corners[3] = swapped
-                )
-                append triangles #(slot,corners,node,(skinModifier != undefined))
+                append triangles #(slot,corners)
             )
         )
-        for snapshot in snapshots do free snapshot
-        snapshots = #()
-        if triangles.count == 0 do throw "The selection contains no exportable mesh faces."
-        if hasSkin and frameNodes.count > 254 do throw "The MDL frame table supports at most 254 exported hierarchy frames."
-        if materials.count > 2048 do throw "The material count exceeds the MDL limit."
-        local frameOrder = MLMdlFrameOrder frameNodes
-        local frameRemap = for index = 1 to frameNodes.count collect 0
-        for index = 1 to frameOrder.count do frameRemap[frameOrder[index]] = index
-        for triangle in triangles do for corner in triangle[2] do for influence in corner[5] do
-            influence[1] = frameRemap[influence[1]]
-        frameNodes = for index in frameOrder collect frameNodes[index]
+        if triangles.count < 1 or triangles.count > 4096 do throw "PSP object export requires between 1 and 4096 triangles in this build. Split larger objects."
         local ordered = #()
         for slot = 1 to materials.count do for triangle in triangles where triangle[1] == slot do append ordered triangle
-        #(ordered, materials, frameNodes, hasSkin, rootInverse, hasRigid)
-    )
-    catch
-    (
-        for snapshot in snapshots do free snapshot
-        throw()
-    )
-)
-
-fn MLExportRigidFrame objectNode frameNodes =
-(
-    local ancestor = objectNode.parent
-    while ancestor != undefined do
-    (
-        if (findItem frameNodes ancestor) != 0 and (getUserProp ancestor "MaxLeedsFrame") != undefined do return ancestor
-        ancestor = ancestor.parent
-    )
-    objectNode
-)
-
-fn MLTrianglePalette triangle maximumBones =
-(
-    local palette = #()
-    for corner in triangle[2] do for influence in corner[5] do
-    (
-        if (findItem palette influence[1]) == 0 do append palette influence[1]
-    )
-    if palette.count > maximumBones do throw "A triangle contains more bone influences than this platform can address."
-    palette
-)
-
-fn MLCornerEqual first second =
-(
-    if distance first[1] second[1] > 0.000001 do return false
-    if distance first[2] second[2] > 0.000001 do return false
-    if distance first[4] second[4] > 0.000001 do return false
-    local left = first[3]
-    local right = second[3]
-    if (abs (left.r - right.r)) > 0.01 or (abs (left.g - right.g)) > 0.01 or (abs (left.b - right.b)) > 0.01 or (abs (left.a - right.a)) > 0.01 do return false
-    if first[5].count != second[5].count do return false
-    for index = 1 to first[5].count do
-    (
-        if first[5][index][1] != second[5][index][1] or (abs (first[5][index][2] - second[5][index][2])) > 0.000001 do return false
-    )
-    true
-)
-
-fn MLBuildModelStrips triangles skinned maximumVertices paletteLimit =
-(
-    local used = for index = 1 to triangles.count collect false
-    local strips = #()
-    for startIndex = 1 to triangles.count where not used[startIndex] do
-    (
-        local source = triangles[startIndex]
-        local vertices = copy source[2]
-        local palette = if skinned then MLTrianglePalette source paletteLimit else #()
-        used[startIndex] = true
-        local extended = true
-        while extended and vertices.count < maximumVertices do
-        (
-            extended = false
-            local nextVertex = vertices.count + 1
-            local requiredFirst = if (mod nextVertex 2) == 1 then vertices[vertices.count - 1] else vertices[vertices.count]
-            local requiredSecond = if (mod nextVertex 2) == 1 then vertices[vertices.count] else vertices[vertices.count - 1]
-            for candidateIndex = startIndex + 1 to (amin triangles.count (startIndex + 512)) while not extended do
-            (
-                if not used[candidateIndex] and triangles[candidateIndex][1] == source[1] do
-                (
-                    local candidate = triangles[candidateIndex][2]
-                    for rotation = 1 to 3 while not extended do
-                    (
-                        local first = candidate[rotation]
-                        local second = candidate[(mod rotation 3) + 1]
-                        local third = candidate[(mod (rotation + 1) 3) + 1]
-                        if (MLCornerEqual first requiredFirst) and (MLCornerEqual second requiredSecond) do
-                        (
-                            local nextPalette = copy palette
-                            if skinned do
-                            (
-                                for influence in third[5] where (findItem nextPalette influence[1]) == 0 do append nextPalette influence[1]
-                            )
-                            if nextPalette.count <= paletteLimit do
-                            (
-                                append vertices third
-                                palette = nextPalette
-                                used[candidateIndex] = true
-                                extended = true
-                            )
-                        )
-                    )
-                )
-            )
-        )
-        append strips #(source[1], vertices, palette)
-    )
-    strips
-)
-
-fn MLPspWeightBytes influences palette =
-(
-    local bytes = for index = 1 to 8 collect 0
-    local largest = 0
-    local total = 0
-    for influence in influences do
-    (
-        local channel = findItem palette influence[1]
-        if channel == 0 do throw "A skin influence is absent from the triangle bone palette."
-        bytes[channel] = amin 128 (amax 0 ((influence[2] * 128.0 + 0.5) as integer))
-        total += bytes[channel]
-        if largest == 0 or bytes[channel] > bytes[largest] do largest = channel
-    )
-    if largest == 0 do throw "A skin vertex has no bone weights."
-    bytes[largest] += (128 - total)
-    if bytes[largest] < 0 or bytes[largest] > 128 do throw "A skin weight could not be encoded."
-    bytes
-)
-
-fn MLResolveMdlBoneIDs frameNodes =
-(
-    local ids = for node in frameNodes collect -1
-    local reserved = #()
-    for index = 1 to frameNodes.count do
-    (
-        local property = getUserProp frameNodes[index] "MaxLeedsBoneID"
-        if property != undefined do
-        (
-            local value = property as integer
-            if value == undefined or value < -1 or value > 255 do throw "MDL bone IDs must be integers from -1 through 255."
-            if value >= 0 do
-            (
-                if (findItem reserved value) != 0 do throw "Two MDL bones have the same animation ID."
-                append reserved value
-                ids[index] = value
-            )
-        )
-    )
-    for index = 1 to frameNodes.count where ids[index] < 0 and (classof frameNodes[index]) == BoneGeometry do
-    (
-        local available = 0
-        while available <= 255 and (findItem reserved available) != 0 do available += 1
-        if available > 255 do throw "There are no unused MDL animation bone IDs."
-        ids[index] = available
-        append reserved available
-    )
-    ids
-)
-
-fn MLWriteSkeleton writer rootFrame frameNodes rootInverse platform game requireBones =
-(
-    if frameNodes.count < 1 do throw "A skinned export needs at least one bone."
-    local frameOrder = MLMdlFrameOrder frameNodes
-    for index = 1 to frameOrder.count do if frameOrder[index] != index do throw "MDL frames must be gathered in hierarchy traversal order before serialization."
-    local boneIDs = MLResolveMdlBoneIDs frameNodes
-    local framePointers = #()
-    local parents = #()
-    for node in frameNodes do
-    (
-        writer.align 16
-        append framePointers (writer.tell())
-        writer.zeros 0xAC
-        local ancestor = node.parent
-        local frameParent = 0
-        while ancestor != undefined and frameParent == 0 do
-        (
-            frameParent = findItem frameNodes ancestor
-            ancestor = ancestor.parent
-        )
-        append parents frameParent
-    )
-    local framesEnd = writer.tell()
-    local nameOffset = if platform == "PSP" or game == "VCS" then 0xA8 else 0xA4
-    for index = 1 to frameNodes.count do
-    (
-        local node = frameNodes[index]
-        local pointer = framePointers[index]
-        local world = node.transform * rootInverse
-        local parentPointer = if parents[index] == 0 then rootFrame else framePointers[parents[index]]
-        local parentWorld = if parents[index] == 0 then (matrix3 1) else (frameNodes[parents[index]].transform * rootInverse)
-        writer.pointer (pointer + 4) parentPointer
-        writer.seek (pointer + 0x10)
-        writer.matrix (world * inverse parentWorld)
-        writer.matrix world
-    )
-    for parentIndex = 0 to frameNodes.count do
-    (
-        local first = 0
-        local previous = 0
-        for childIndex = 1 to frameNodes.count where parents[childIndex] == parentIndex do
-        (
-            if first == 0 then first = childIndex
-            else writer.pointer (framePointers[previous] + 0x94) framePointers[childIndex]
-            previous = childIndex
-        )
-        if first != 0 do writer.pointer ((if parentIndex == 0 then rootFrame else framePointers[parentIndex]) + 0x90) framePointers[first]
-    )
-    writer.seek framesEnd
-    for index = 1 to frameNodes.count do
-    (
-        local frameName = getUserProp frameNodes[index] "MaxLeedsFrameName"
-        if frameName == undefined or frameName == "" do frameName = frameNodes[index].name
-        if frameName.count > 127 do throw "A bone name is longer than 127 characters."
-        local namePointer = writer.tell()
-        writer.text frameName
-        writer.pointer (framePointers[index] + nameOffset) namePointer
-    )
-    local boneCount = 0
-    for id in boneIDs where id >= 0 do boneCount += 1
-    if boneCount == 0 and not requireBones do return #(0, framePointers)
-    if boneCount == 0 do throw "No real animation bones were found in the hierarchy."
-    writer.align 16
-    local hierarchy = writer.tell()
-    writer.zeros 0x38
-    local table = writer.tell()
-    local bones = 0
-    for index = 1 to frameNodes.count do
-    (
-        local boneID = boneIDs[index]
-        if boneID >= 0 do
-        (
-            writer.long (bit.or (bit.shift index 8) boneID)
-            writer.long 0
-            bones += 1
-        )
-    )
-    writer.patchLong hierarchy 0x3000
-    writer.patchLong (hierarchy + 4) bones
-    writer.pointer (hierarchy + 0x30) table
-    writer.pointer (hierarchy + 0x34) rootFrame
-    #(hierarchy, framePointers)
-)
-
-fn MLWritePspObject destination nodes game modelID =
-(
-    if modelID < 0 or modelID > 65534 do throw "Enter the game's model ID, or import its original model first."
-    local collected = MLGatherExportGeometry nodes
-    local objectNodes = #()
-    for triangle in collected[1] where (findItem objectNodes triangle[3]) == 0 do append objectNodes triangle[3]
-    if objectNodes.count > 1 do return MLWriteClumpModel destination collected game modelID "PSP"
-    local writer = MLWriter()
-    local temporary = MLTemporaryFile destination
-    try
-    (
-        local exportData = collected
-        local triangles = exportData[1]
-        local materials = exportData[2]
-        local frameNodes = exportData[3]
-        local skinned = exportData[4]
-        local rootInverse = exportData[5]
-        local strips = MLBuildModelStrips triangles skinned 255 8
-        if strips.count < 1 or strips.count > 4096 do throw "PSP MDL allows at most 4096 strips per geometry. Divide this object."
-        local vertexCount = 0
-        for strip in strips do vertexCount += strip[2].count
-        if vertexCount > 1000000 do throw "The PSP geometry exceeds one million strip vertices."
+        triangles = ordered
         writer.openFile temporary
         writer.zeros 0x30
         local frame = writer.tell()
@@ -964,16 +565,11 @@ fn MLWritePspObject destination nodes game modelID =
         local geometry = writer.tell()
         writer.zeros 0x20
         local header = writer.tell()
-        writer.zeros (0x48 + strips.count * 0x30)
+        writer.zeros (0x48 + triangles.count * 0x30)
         writer.align 4
         local verticesPointer = writer.tell()
-        for strip in strips do for corner in strip[2] do
+        for triangle in triangles do for corner in triangle[2] do
         (
-            if skinned do
-            (
-                local weightBytes = MLPspWeightBytes corner[5] strip[3]
-                for weightByte in weightBytes do writer.byte weightByte
-            )
             writer.float corner[2].x; writer.float (1.0 - corner[2].y)
             local rgba = corner[3]
             writer.byte (rgba.r as integer); writer.byte (rgba.g as integer); writer.byte (rgba.b as integer); writer.byte (rgba.a as integer)
@@ -1035,49 +631,32 @@ fn MLWritePspObject destination nodes game modelID =
         writer.float radius
         writer.seek end
         writer.patchLong header (geometryEnd - header)
-        writer.patchLong (header + 4) (if skinned then 0x1C3FF else 0x1FF)
-        writer.patchLong (header + 8) strips.count
+        writer.patchLong (header + 4) 0x1FF
+        writer.patchLong (header + 8) triangles.count
         writer.seek (header + 0x20)
         writer.point [1,1,1]
-        writer.long vertexCount
+        writer.long (triangles.count * 3)
         writer.point [0,0,0]
         writer.long 0
         writer.long (verticesPointer - header)
         writer.float 0
-        local vertexOffset = 0
-        for index = 1 to strips.count do
+        for index = 1 to triangles.count do
         (
             writer.seek (header + 0x48 + (index - 1) * 0x30)
-            writer.long (vertexOffset * (if skinned then 44 else 36))
-            writer.short (strips[index][2].count - 2)
-            writer.short (strips[index][1] - 1)
+            writer.long ((index - 1) * 108)
+            writer.short 1
+            writer.short (triangles[index][1] - 1)
             writer.float 0; writer.float 1; writer.float 1
-            local corners = strips[index][2]
-            local minU = corners[1][2].x
-            local maxU = minU
-            local minV = corners[1][2].y
-            local maxV = minV
-            for corner in corners do
-            (
-                minU = amin minU corner[2].x
-                maxU = amax maxU corner[2].x
-                minV = amin minV corner[2].y
-                maxV = amax maxV corner[2].y
-            )
-            writer.float minU
-            writer.float (1.0 - maxV)
-            writer.float maxU
-            writer.float (1.0 - minV)
+            local corners = triangles[index][2]
+            writer.float (amin corners[1][2].x corners[2][2].x corners[3][2].x)
+            writer.float (1.0 - amax corners[1][2].y corners[2][2].y corners[3][2].y)
+            writer.float (amax corners[1][2].x corners[2][2].x corners[3][2].x)
+            writer.float (1.0 - amin corners[1][2].y corners[2][2].y corners[3][2].y)
             writer.float 0
-            if skinned then
-            (
-                for boneIndex = 1 to 8 do writer.byte (if boneIndex <= strips[index][3].count then strips[index][3][boneIndex] else 0)
-            )
-            else writer.zeros 8
-            vertexOffset += corners.count
+            writer.zeros 8
         )
         writer.seek end
-        writer.patchLong atomic (MLMdlAtomicTag game "PSP")
+        writer.patchLong atomic (if game == "LCS" then 0x01050001 else 0x00041601)
         writer.pointer (atomic + 4) frame
         writer.pointer (atomic + 8) (frame + 8)
         writer.pointer (atomic + 12) (frame + 8)
@@ -1085,11 +664,6 @@ fn MLWritePspObject destination nodes game modelID =
         writer.seek (atomic + 40)
         writer.short modelID; writer.short 0
         writer.seek end
-        if skinned do
-        (
-            local skeleton = MLWriteSkeleton writer frame frameNodes rootInverse "PSP" game true
-            writer.pointer (atomic + 44) skeleton[1]
-        )
         writer.pointer 0x20 atomic
         writer.align 4
         local relocationOffset = writer.tell()
@@ -1114,6 +688,8 @@ fn MLWritePspObject destination nodes game modelID =
         writer.patchLong 0x1C 0x10000
         writer.align 2048
         writer.closeFile()
+        for snapshot in snapshots do free snapshot
+        snapshots = #()
         MLFinishFile temporary destination
         triangles.count
     )
@@ -1121,583 +697,7 @@ fn MLWritePspObject destination nodes game modelID =
     (
         local reason = getCurrentException()
         writer.closeFile()
-        if doesFileExist temporary do deleteFile temporary
-        throw()
-    )
-)
-
-fn MLPs2Byte value = (amin 255 (amax 0 ((value + 0.5) as integer)))
-fn MLPs2SignedByte value = (amin 127 (amax -127 ((value + (if value >= 0 then 0.5 else -0.5)) as integer)))
-fn MLPs2SignedShort value = (amin 32767 (amax -32767 ((value + (if value >= 0 then 0.5 else -0.5)) as integer)))
-
-fn MLWritePs2Strip writer strip scale skinned =
-(
-    local corners = strip[2]
-    local count = corners.count
-    local uvMax = [0,0,0]
-    local signedUV = false
-    for corner in corners do
-    (
-        uvMax.x = amax uvMax.x (abs corner[2].x)
-        uvMax.y = amax uvMax.y (abs (1.0 - corner[2].y))
-        if corner[2].x < 0 or corner[2].y > 1.0 do signedUV = true
-    )
-    local range = if signedUV then (127.0 / 127.5) else 2.0
-    local uvScale = [amax 0.5 (uvMax.x / range), amax 0.5 (uvMax.y / range), 1]
-    local packetStart = writer.tell()
-    writer.zeros 16
-    writer.long (bit.or 0x79000000 (bit.shift count 16))
-    for corner in corners do
-    (
-        writer.signedShort (MLPs2SignedShort (corner[1].x / scale.x * 32768.0))
-        writer.signedShort (MLPs2SignedShort (corner[1].y / scale.y * 32768.0))
-        writer.signedShort (MLPs2SignedShort (corner[1].z / scale.z * 32768.0))
-    )
-    writer.align 4
-    writer.long (bit.or (if signedUV then 0x76000000 else 0x76004000) (bit.shift count 16))
-    for corner in corners do
-    (
-        local u = corner[2].x / uvScale.x * 127.5
-        local v = (1.0 - corner[2].y) / uvScale.y * 127.5
-        if signedUV then
-        (
-            writer.signedByte (MLPs2SignedByte u)
-            writer.signedByte (MLPs2SignedByte v)
-        )
-        else
-        (
-            writer.byte (MLPs2Byte u)
-            writer.byte (MLPs2Byte v)
-        )
-    )
-    writer.align 4
-    writer.long (bit.or 0x6F000000 (bit.shift count 16))
-    for corner in corners do
-    (
-        local c = corner[3]
-        local r = MLPs2Byte (c.r * 31.0 / 255.0)
-        local g = MLPs2Byte (c.g * 31.0 / 255.0)
-        local b = MLPs2Byte (c.b * 31.0 / 255.0)
-        writer.short (bit.or r (bit.or (bit.shift g 5) (bit.or (bit.shift b 10) (if c.a >= 128 then 0x8000 else 0))))
-    )
-    writer.align 4
-    writer.long (bit.or 0x6A000000 (bit.shift count 16))
-    for corner in corners do
-    (
-        local n = corner[4]
-        writer.signedByte (MLPs2SignedByte (n.x * 127.0))
-        writer.signedByte (MLPs2SignedByte (n.y * 127.0))
-        writer.signedByte (MLPs2SignedByte (n.z * 127.0))
-    )
-    writer.align 4
-    if skinned do
-    (
-        writer.long (bit.or 0x6C00007F (bit.shift count 16))
-        for corner in corners do
-        (
-            for influenceIndex = 1 to 4 do
-            (
-                if influenceIndex <= corner[5].count then
-                (
-                    local influence = corner[5][influenceIndex]
-                    if influence[1] > 63 do throw "PS2 bone offsets can address at most 63 exported hierarchy frames."
-                    local packedWeight = bit.and (bit.floatAsInt influence[2]) (bit.not 255)
-                    writer.long (bit.or packedWeight (influence[1] * 4))
-                )
-                else writer.long 0
-            )
-        )
-    )
-    writer.long 0x14000000
-    writer.align 16
-    local packetEnd = writer.tell()
-    writer.patchLong packetStart (bit.or 0x60000000 (((packetEnd - packetStart - 16) / 16) as integer))
-    #(packetStart, packetEnd, uvScale)
-)
-
-fn MLWritePs2Object destination nodes game modelID =
-(
-    if modelID < 0 or modelID > 65534 do throw "Enter the game's model ID, or import its original model first."
-    local data = MLGatherExportGeometry nodes
-    local objectNodes = #()
-    for triangle in data[1] where (findItem objectNodes triangle[3]) == 0 do append objectNodes triangle[3]
-    if objectNodes.count > 1 do return MLWriteClumpModel destination data game modelID "PS2"
-    local triangles = data[1]
-    local materials = data[2]
-    local frameNodes = data[3]
-    local skinned = data[4]
-    local rootInverse = data[5]
-    local strips = MLBuildModelStrips triangles skinned 255 63
-    if strips.count > 512 do throw "PS2 MDL geometry supports at most 512 strips. Divide this object."
-    if skinned and frameNodes.count > 63 do throw "PS2 skin offsets support up to 63 hierarchy frames in this writer."
-    local writer = MLWriter()
-    local temporary = MLTemporaryFile destination
-    try
-    (
-        local scale = [0.0001,0.0001,0.0001]
-        local minimum = copy triangles[1][2][1][1]
-        local maximum = copy minimum
-        for triangle in triangles do for corner in triangle[2] do for axis = 1 to 3 do
-        (
-            minimum[axis] = amin minimum[axis] corner[1][axis]
-            maximum[axis] = amax maximum[axis] corner[1][axis]
-            scale[axis] = amax scale[axis] ((abs corner[1][axis]) * 1.0001)
-        )
-        local center = (minimum + maximum) / 2.0
-        local radius = 0.0
-        for triangle in triangles do for corner in triangle[2] do radius = amax radius (distance center corner[1])
-        writer.openFile temporary
-        writer.zeros 0x30
-        local frame = writer.tell()
-        writer.zeros 0xAC
-        writer.align 16
-        local geometry = writer.tell()
-        writer.zeros 0x20
-        local header = writer.tell()
-        local firstPacket = MLAlign (0x40 + strips.count * 0x30) 16
-        writer.zeros firstPacket
-        local packetRecords = #()
-        for strip in strips do append packetRecords (MLWritePs2Strip writer strip scale skinned)
-        local geometryEnd = writer.tell()
-        if geometryEnd - header > 0xFFFFF do throw "PS2 geometry exceeds the 20-bit packet size limit."
-        local materialPointers = #()
-        for description in materials do
-        (
-            writer.align 4
-            append materialPointers (writer.tell())
-            writer.long 0
-            local rgba = description.rgba
-            writer.long (bit.or (rgba.r as integer) (bit.or (bit.shift (rgba.g as integer) 8) (bit.or (bit.shift (rgba.b as integer) 16) (bit.shift (rgba.a as integer) 24))))
-            writer.long 2
-            writer.long 0
-        )
-        local materialTable = writer.tell()
-        for pointer in materialPointers do
-        (
-            local field = writer.tell()
-            writer.long pointer
-            append writer.relocations field
-        )
-        writer.align 16
-        local atomic = writer.tell()
-        writer.zeros 0x34
-        local frameName = writer.tell()
-        writer.text "dummy"
-        local end = writer.tell()
-        writer.seek frame
-        writer.long 0x03000000
-        writer.seek (frame + 0x10)
-        writer.matrix (matrix3 1)
-        writer.matrix (matrix3 1)
-        writer.seek end
-        writer.pointer (frame + 8) (atomic + 8)
-        writer.pointer (frame + 12) (atomic + 8)
-        writer.pointer (frame + 0x98) frame
-        writer.pointer (frame + (if game == "LCS" then 0xA4 else 0xA8)) frameName
-        writer.patchLong geometry 8
-        writer.patchLong (geometry + 8) 1
-        writer.pointer (geometry + 12) materialTable
-        writer.patchLong (geometry + 16) materials.count
-        writer.patchLong (geometry + 20) materials.count
-        writer.patchLong (header + 0x10) (bit.or (bit.shift strips.count 20) (geometryEnd - header))
-        writer.seek (header + 0x1A)
-        writer.short firstPacket
-        writer.seek (header + 0x28)
-        writer.point scale
-        writer.seek (header + 0x34)
-        writer.point [0,0,0]
-        for index = 1 to strips.count do
-        (
-            local descriptor = header + 0x40 + (index - 1) * 0x30
-            writer.patchLong (descriptor + 0x1C) (packetRecords[index][1] - header - firstPacket)
-            writer.seek (descriptor + 0x10)
-            writer.float packetRecords[index][3].x
-            writer.float packetRecords[index][3].y
-            writer.seek (descriptor + 0x22)
-            writer.short (strips[index][1] - 1)
-        )
-        writer.seek end
-        writer.patchLong atomic (MLMdlAtomicTag game "PS2")
-        writer.pointer (atomic + 4) frame
-        writer.pointer (atomic + 8) (frame + 8)
-        writer.pointer (atomic + 12) (frame + 8)
-        writer.pointer (atomic + 20) geometry
-        writer.seek (atomic + 40)
-        writer.short modelID
-        writer.short 0
-        writer.seek end
-        if skinned do
-        (
-            local skeleton = MLWriteSkeleton writer frame frameNodes rootInverse "PS2" game true
-            writer.pointer (atomic + 44) skeleton[1]
-        )
-        writer.pointer 0x20 atomic
-        writer.align 4
-        local relocationOffset = writer.tell()
-        local textureHead = relocationOffset + (writer.relocations.count + materials.count + 1) * 4
-        for offset in writer.relocations do writer.long offset
-        for offset in materialPointers do writer.long offset
-        writer.long textureHead
-        writer.long (atomic + 0x24)
-        for index = 1 to materials.count do
-        (
-            local namePointer = writer.tell()
-            writer.text materials[index].name
-            writer.patchLong materialPointers[index] namePointer
-        )
-        local logicalEnd = writer.tell()
-        writer.patchLong 0 0x006D646C
-        writer.patchLong 8 logicalEnd
-        writer.patchLong 12 relocationOffset
-        writer.patchLong 16 relocationOffset
-        writer.patchLong 20 (writer.relocations.count + materials.count + 1)
-        writer.patchLong 0x18 textureHead
-        writer.patchLong 0x1C 0x10000
-        writer.align 2048
-        writer.closeFile()
-        MLFinishFile temporary destination
-        triangles.count
-    )
-    catch
-    (
-        writer.closeFile()
-        if doesFileExist temporary do deleteFile temporary
-        throw()
-    )
-)
-
-fn MLWriteMaterialsBlock writer geometry materials =
-(
-    local pointers = #()
-    for material in materials do
-    (
-        writer.align 4
-        append pointers (writer.tell())
-        writer.long 0
-        local rgba = material.rgba
-        writer.long (bit.or (rgba.r as integer) (bit.or (bit.shift (rgba.g as integer) 8) (bit.or (bit.shift (rgba.b as integer) 16) (bit.shift (rgba.a as integer) 24))))
-        writer.long 2
-        writer.long 0
-    )
-    local table = writer.tell()
-    for pointer in pointers do
-    (
-        local field = writer.tell()
-        writer.long pointer
-        append writer.relocations field
-    )
-    writer.patchLong geometry 8
-    writer.patchLong (geometry + 8) 1
-    writer.pointer (geometry + 12) table
-    writer.patchLong (geometry + 16) materials.count
-    writer.patchLong (geometry + 20) materials.count
-    pointers
-)
-
-fn MLWritePspGeometryBlock writer triangles materials skinned =
-(
-    local strips = MLBuildModelStrips triangles skinned 255 8
-    if strips.count < 1 or strips.count > 4096 do throw "PSP geometry exceeds 4096 strips."
-    local vertexCount = 0
-    for strip in strips do vertexCount += strip[2].count
-    if vertexCount > 1000000 do throw "PSP geometry exceeds one million vertices."
-    writer.align 16
-    local geometry = writer.tell()
-    writer.zeros 0x20
-    local header = writer.tell()
-    writer.zeros (0x48 + strips.count * 0x30)
-    writer.align 4
-    local vertexStart = writer.tell()
-    for strip in strips do for corner in strip[2] do
-    (
-        if skinned do
-        (
-            local weightBytes = MLPspWeightBytes corner[5] strip[3]
-            for value in weightBytes do writer.byte value
-        )
-        writer.float corner[2].x
-        writer.float (1.0 - corner[2].y)
-        local rgba = corner[3]
-        writer.byte (rgba.r as integer)
-        writer.byte (rgba.g as integer)
-        writer.byte (rgba.b as integer)
-        writer.byte (rgba.a as integer)
-        writer.point corner[4]
-        writer.point corner[1]
-    )
-    local geometryEnd = writer.tell()
-    local minimum = copy triangles[1][2][1][1]
-    local maximum = copy minimum
-    for triangle in triangles do for corner in triangle[2] do for axis = 1 to 3 do
-    (
-        minimum[axis] = amin minimum[axis] corner[1][axis]
-        maximum[axis] = amax maximum[axis] corner[1][axis]
-    )
-    local center = (minimum + maximum) / 2
-    local radius = 0.0
-    for triangle in triangles do for corner in triangle[2] do radius = amax radius (distance center corner[1])
-    writer.seek (header + 0x10)
-    writer.point center
-    writer.float radius
-    writer.patchLong header (geometryEnd - header)
-    writer.patchLong (header + 4) (if skinned then 0x1C3FF else 0x1FF)
-    writer.patchLong (header + 8) strips.count
-    writer.seek (header + 0x20)
-    writer.point [1,1,1]
-    writer.long vertexCount
-    writer.point [0,0,0]
-    writer.long 0
-    writer.long (vertexStart - header)
-    writer.float 0
-    local vertexOffset = 0
-    for index = 1 to strips.count do
-    (
-        local descriptor = header + 0x48 + (index - 1) * 0x30
-        writer.seek descriptor
-        writer.long (vertexOffset * (if skinned then 44 else 36))
-        writer.short (strips[index][2].count - 2)
-        writer.short (strips[index][1] - 1)
-        writer.float 0
-        writer.float 1
-        writer.float 1
-        local corners = strips[index][2]
-        local minU = corners[1][2].x
-        local maxU = minU
-        local minV = corners[1][2].y
-        local maxV = minV
-        for corner in corners do
-        (
-            minU = amin minU corner[2].x
-            maxU = amax maxU corner[2].x
-            minV = amin minV corner[2].y
-            maxV = amax maxV corner[2].y
-        )
-        writer.float minU
-        writer.float (1.0 - maxV)
-        writer.float maxU
-        writer.float (1.0 - minV)
-        writer.float 0
-        if skinned then
-        (
-            for boneIndex = 1 to 8 do writer.byte (if boneIndex <= strips[index][3].count then strips[index][3][boneIndex] else 0)
-        )
-        else writer.zeros 8
-        vertexOffset += corners.count
-    )
-    writer.seek geometryEnd
-    local materialPointers = MLWriteMaterialsBlock writer geometry materials
-    #(geometry, materialPointers)
-)
-
-fn MLWritePs2GeometryBlock writer triangles materials skinned =
-(
-    local strips = MLBuildModelStrips triangles skinned 255 63
-    if strips.count < 1 or strips.count > 512 do throw "PS2 geometry exceeds 512 strips."
-    local scale = [0.0001,0.0001,0.0001]
-    for triangle in triangles do for corner in triangle[2] do for axis = 1 to 3 do
-        scale[axis] = amax scale[axis] ((abs corner[1][axis]) * 1.0001)
-    writer.align 16
-    local geometry = writer.tell()
-    writer.zeros 0x20
-    local header = writer.tell()
-    local firstPacket = MLAlign (0x40 + strips.count * 0x30) 16
-    writer.zeros firstPacket
-    local packets = #()
-    for strip in strips do append packets (MLWritePs2Strip writer strip scale skinned)
-    local geometryEnd = writer.tell()
-    if geometryEnd - header > 0xFFFFF do throw "PS2 geometry exceeds the 20-bit packet size limit."
-    writer.patchLong (header + 0x10) (bit.or (bit.shift strips.count 20) (geometryEnd - header))
-    writer.seek (header + 0x1A)
-    writer.short firstPacket
-    writer.seek (header + 0x28)
-    writer.point scale
-    writer.seek (header + 0x34)
-    writer.point [0,0,0]
-    for index = 1 to strips.count do
-    (
-        local descriptor = header + 0x40 + (index - 1) * 0x30
-        writer.patchLong (descriptor + 0x1C) (packets[index][1] - header - firstPacket)
-        writer.seek (descriptor + 0x10)
-        writer.float packets[index][3].x
-        writer.float packets[index][3].y
-        writer.seek (descriptor + 0x22)
-        writer.short (strips[index][1] - 1)
-    )
-    writer.seek geometryEnd
-    local materialPointers = MLWriteMaterialsBlock writer geometry materials
-    #(geometry, materialPointers)
-)
-
-fn MLWriteClumpModel destination data game modelID platform =
-(
-    if modelID < 0 or modelID > 65534 do throw "Enter the game's model ID before exporting."
-    local triangles = data[1]
-    local materials = data[2]
-    local frameNodes = data[3]
-    local skinned = data[4]
-    local rootInverse = data[5]
-    if skinned and platform == "PS2" and frameNodes.count > 63 do
-        throw "PS2 skin offsets support at most 63 hierarchy frames."
-    if frameNodes.count > 254 do throw "The MDL hierarchy exceeds 254 frames."
-    local objectNodes = #()
-    for triangle in triangles where (findItem objectNodes triangle[3]) == 0 do append objectNodes triangle[3]
-    if objectNodes.count < 2 do throw "ClumpModel export needs two or more mesh parts."
-    if objectNodes.count > 2048 do throw "The MDL clump contains too many objects."
-    local writer = MLWriter()
-    local temporary = MLTemporaryFile destination
-    try
-    (
-        writer.openFile temporary
-        writer.zeros 0x30
-        local rootFrame = writer.tell()
-        writer.zeros 0xAC
-        local geometryPointers = #()
-        local materialPointers = #()
-        local materialNames = #()
-        local skinnedParts = #()
-        for objectNode in objectNodes do
-        (
-            local localTriangles = #()
-            local localMaterials = #()
-            local usedMaterials = #()
-            local isSkinned = false
-            local rigidFrame = MLExportRigidFrame objectNode frameNodes
-            local inverseFrame = matrix3 1
-            local normalFrame = matrix3 1
-            for triangle in triangles where triangle[3] == objectNode do
-            (
-                if localTriangles.count == 0 do
-                (
-                    isSkinned = triangle[4]
-                    local frameWorld = if isSkinned then (matrix3 1) else (rigidFrame.transform * rootInverse)
-                    inverseFrame = inverse frameWorld
-                    normalFrame = matrix3 [frameWorld.row1.x,frameWorld.row2.x,frameWorld.row3.x] [frameWorld.row1.y,frameWorld.row2.y,frameWorld.row3.y] [frameWorld.row1.z,frameWorld.row2.z,frameWorld.row3.z] [0,0,0]
-                )
-                local localMaterialID = findItem usedMaterials triangle[1]
-                if localMaterialID == 0 do
-                (
-                    append usedMaterials triangle[1]
-                    append localMaterials materials[triangle[1]]
-                    localMaterialID = localMaterials.count
-                )
-                local corners = #()
-                for corner in triangle[2] do
-                (
-                    local point = corner[1] * inverseFrame
-                    local normal = if isSkinned then corner[4] else normalize (corner[4] * normalFrame)
-                    append corners #(point,corner[2],corner[3],normal,corner[5])
-                )
-                append localTriangles #(localMaterialID,corners,objectNode,isSkinned)
-            )
-            local result = if platform == "PSP" then
-                MLWritePspGeometryBlock writer localTriangles localMaterials isSkinned
-                else MLWritePs2GeometryBlock writer localTriangles localMaterials isSkinned
-            append geometryPointers result[1]
-            append skinnedParts isSkinned
-            for index = 1 to result[2].count do
-            (
-                append materialPointers result[2][index]
-                append materialNames localMaterials[index].name
-            )
-        )
-        writer.align 16
-        local clump = writer.tell()
-        writer.zeros 0x34
-        local atomics = #()
-        for index = 1 to objectNodes.count do
-        (
-            writer.align 16
-            append atomics (writer.tell())
-            writer.zeros 0x34
-        )
-        local rootName = writer.tell()
-        writer.text "root"
-        local end = writer.tell()
-        writer.seek rootFrame
-        writer.long 0x03000000
-        writer.seek (rootFrame + 0x10)
-        writer.matrix (matrix3 1)
-        writer.matrix (matrix3 1)
-        writer.seek end
-        writer.pointer (rootFrame + 0x98) rootFrame
-        writer.pointer (rootFrame + (if platform == "PSP" or game == "VCS" then 0xA8 else 0xA4)) rootName
-        writer.patchLong clump (MLMdlClumpTag game platform)
-        writer.pointer (clump + 4) rootFrame
-        writer.pointer (clump + 8) (atomics[1] + 0x1C)
-        writer.pointer (clump + 12) (atomics[atomics.count] + 0x1C)
-        local skeleton = MLWriteSkeleton writer rootFrame frameNodes rootInverse platform game skinned
-        local hierarchy = skeleton[1]
-        local framePointers = skeleton[2]
-        local endOfSkeleton = writer.tell()
-        local atomicFrames = #()
-        for index = 1 to atomics.count do
-        (
-            local atomic = atomics[index]
-            local framePointer = rootFrame
-            if not skinnedParts[index] do
-            (
-                local rigidFrame = MLExportRigidFrame objectNodes[index] frameNodes
-                local frameIndex = findItem frameNodes rigidFrame
-                if frameIndex == 0 do throw "A rigid model part has no matching frame."
-                framePointer = framePointers[frameIndex]
-            )
-            append atomicFrames framePointer
-            writer.patchLong atomic (MLMdlAtomicTag game platform)
-            writer.pointer (atomic + 4) framePointer
-            writer.pointer (atomic + 20) geometryPointers[index]
-            writer.pointer (atomic + 28) (if index == atomics.count then clump + 8 else atomics[index + 1] + 0x1C)
-            writer.pointer (atomic + 32) (if index == 1 then clump + 8 else atomics[index - 1] + 0x1C)
-            if skinnedParts[index] do writer.pointer (atomic + 44) hierarchy
-            writer.seek (atomic + 40)
-            writer.short modelID
-            writer.short 0
-        )
-        local linkedFrames = #()
-        for framePointer in atomicFrames where (findItem linkedFrames framePointer) == 0 do append linkedFrames framePointer
-        for framePointer in linkedFrames do
-        (
-            local attached = #()
-            for index = 1 to atomicFrames.count where atomicFrames[index] == framePointer do append attached index
-            writer.pointer (framePointer + 8) (atomics[attached[1]] + 8)
-            writer.pointer (framePointer + 12) (atomics[attached[attached.count]] + 8)
-            for linkIndex = 1 to attached.count do
-            (
-                local atomicIndex = attached[linkIndex]
-                writer.pointer (atomics[atomicIndex] + 8) (if linkIndex == attached.count then framePointer + 8 else atomics[attached[linkIndex + 1]] + 8)
-                writer.pointer (atomics[atomicIndex] + 12) (if linkIndex == 1 then framePointer + 8 else atomics[attached[linkIndex - 1]] + 8)
-            )
-        )
-        writer.seek endOfSkeleton
-        writer.pointer 0x20 clump
-        writer.align 4
-        local relocationOffset = writer.tell()
-        local textureHead = relocationOffset + (writer.relocations.count + materialPointers.count + 1) * 4
-        for offset in writer.relocations do writer.long offset
-        for pointer in materialPointers do writer.long pointer
-        writer.long textureHead
-        writer.long (atomics[1] + 0x24)
-        for index = 1 to materialPointers.count do
-        (
-            local namePointer = writer.tell()
-            writer.text materialNames[index]
-            writer.patchLong materialPointers[index] namePointer
-        )
-        local logicalEnd = writer.tell()
-        writer.patchLong 0 0x006D646C
-        writer.patchLong 8 logicalEnd
-        writer.patchLong 12 relocationOffset
-        writer.patchLong 16 relocationOffset
-        writer.patchLong 20 (writer.relocations.count + materialPointers.count + 1)
-        writer.patchLong 0x18 textureHead
-        writer.patchLong 0x1C 0x10000
-        writer.align 2048
-        writer.closeFile()
-        MLFinishFile temporary destination
-        triangles.count
-    )
-    catch
-    (
-        writer.closeFile()
+        for snapshot in snapshots do free snapshot
         if doesFileExist temporary do deleteFile temporary
         throw()
     )

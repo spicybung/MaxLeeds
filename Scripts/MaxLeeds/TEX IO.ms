@@ -49,23 +49,23 @@ fn MLUIRefreshTextures =
     )
 )
 
-rollout MLTEXImport "Import textures" width:250
+rollout MLTEXImport "Import TEX" width:214
 (
     group "Source"
     (
-        dropdownList platform "Platform:" items:#("Automatic", "PS2", "PSP") selection:1 width:188 align:#center
+        dropdownList platform "Platform:" items:#("PS2", "PSP") selection:1 width:188 align:#center
     )
     group "Import"
     (
-        button importTextures "Import XTX / CHK / TEX" width:188 height:29 align:#center
+        button importTextures "Import XTX / CHK" width:136 height:29 align:#center
     )
     label status "Ready" width:188 height:29 align:#center
 
-    fn selectedPlatform = #("Auto", "PS2", "PSP")[platform.selection]
+    fn selectedPlatform = #("PS2", "PSP")[platform.selection]
 
     on importTextures pressed do
     (
-        local path = getOpenFileName caption:"Import XTX / CHK / TEX" types:"Textures (*.xtx;*.chk;*.tex;*.txd)|*.xtx;*.chk;*.tex;*.txd|"
+        local path = getOpenFileName caption:"Import XTX / CHK" types:"Stories textures (*.xtx;*.chk)|*.xtx;*.chk|"
         if path != undefined do
         (
             local folder = getSavePath caption:"Choose a folder for decoded textures" initialDir:(getFilenamePath path)
@@ -73,20 +73,11 @@ rollout MLTEXImport "Import textures" width:250
             (
                 try
                 (
-                    local signatureReader = MLReader()
-                    local signature = ""
-                    try (signatureReader.openFile path; signature = signatureReader.text 0 4; signatureReader.closeFile())
-                    catch (signatureReader.closeFile(); throw())
-                    local records = if signature == "TCDT" or signature == "Z2HM" then MLReadManhuntTextures path (selectedPlatform()) folder else MLReadTextures path (selectedPlatform()) folder
+                    local records = MLReadTextures path (selectedPlatform()) folder
                     local nodes = #()
                     if selection.count > 0 do nodes = MLSelectedFamily()
                     local assigned = MLApplyTextures records nodes
-                    for record in records do
-                    (
-                        local duplicateName = false
-                        for existing in MLTEXImagePaths where (toLower (getFilenameFile existing)) == (toLower (getFilenameFile record[2])) do duplicateName = true
-                        if not duplicateName do MLUIAddTexture record[2]
-                    )
+                    for record in records do MLUIAddTexture record[2]
                     MLUIRefreshTextures()
                     status.text = "Imported " + records.count as string + " textures"
                     if assigned > 0 do status.text = status.text + ("; assigned " + assigned as string)
@@ -102,7 +93,7 @@ rollout MLTEXImport "Import textures" width:250
     )
 )
 
-rollout MLTEXExport "Export textures" width:250
+rollout MLTEXExport "Export TEX" width:214
 (
     group "Images"
     (
@@ -120,7 +111,7 @@ rollout MLTEXExport "Export textures" width:250
     )
     group "Export"
     (
-        button exportTextures "Export XTX / CHK" width:188 height:29 align:#center
+        button exportTextures "Export XTX / CHK" width:136 height:29 align:#center
     )
     label status "No images selected" width:188 height:29 align:#center
 
@@ -207,68 +198,7 @@ rollout MLTEXExport "Export textures" width:250
     )
 )
 
-rollout MLTEXManhuntEncode "Create Manhunt dictionary" width:250
-(
-    dropdownList platform "Platform:" items:#("PC","PS2","PSP") selection:1 width:188 align:#center
-    dropdownList depth "Console depth:" items:#("4-bit indexed","8-bit indexed","16-bit RGBA5551","32-bit RGBA") selection:2 width:188 align:#center
-    label description "Uses the images in the export list above." width:220 align:#center
-    dropdownList compression "PC format:" items:#("RGBA32","DXT1","DXT3","DXT5") selection:1 width:188 align:#center
-    checkbox mipmaps "Generate bitmap mipmaps" checked:true align:#center
-    label mipNote "DDS inputs keep their existing format/mips." width:230 align:#center
-    on platform selected index do
-    (
-        compression.enabled = index == 1
-        mipmaps.enabled = true
-    )
-    button encode "Create TEX..." width:188 height:29 align:#center
-    on encode pressed do
-    (
-        local destination = getSaveFileName caption:"Create Manhunt texture dictionary" types:"Manhunt textures (*.tex)|*.tex|"
-        if destination != undefined do try
-        (
-            if (getFilenameType destination) == "" do destination += ".tex"
-            local count = MLWriteManhuntTextures destination MLTEXImagePaths platform.selected (#(4,8,16,32)[depth.selection]) mipmapsEnabled:mipmaps.checked compression:(if platform.selection == 1 then compression.selected else "RGBA32")
-            description.text = "Created " + count as string + " textures"
-        ) catch (messageBox (getCurrentException()) title:"Manhunt texture encoding")
-    )
-)
-
-rollout MLTEXReplace "Replace Manhunt textures" width:250
-(
-    label help "Preserves source layout and mipmaps." width:210 align:#center
-    label help2 "DDS name must match a texture name." width:210 align:#center
-    label help3 "TEX donors must use the same platform." width:220 align:#center
-    button replaceTextures "Replace in TEX / TXD" width:188 height:29 align:#center
-    label status "Choose a DDS or donor dictionary" width:220 height:30 align:#center
-    on replaceTextures pressed do
-    (
-        local source = getOpenFileName caption:"Original Manhunt texture dictionary" types:"Manhunt textures (*.tex;*.txd)|*.tex;*.txd|"
-        if source != undefined do
-        (
-            local replacement = getOpenFileName caption:"Replacement DDS or same-platform TEX donor" types:"Texture replacement (*.dds;*.tex;*.txd)|*.dds;*.tex;*.txd|"
-            if replacement != undefined do
-            (
-                local destination = getSaveFileName caption:"Save replaced texture dictionary" filename:((getFilenamePath source) + (getFilenameFile source) + "_edited" + (getFilenameType source)) types:"Manhunt textures (*.tex;*.txd)|*.tex;*.txd|"
-                if destination != undefined do
-                (
-                    try
-                    (
-                        if (getFilenameType destination) == "" do destination += getFilenameType source
-                        local count = MLReplaceManhuntTextures source replacement destination
-                        status.text = "Replaced " + count as string + " textures"
-                    )
-                    catch
-                    (
-                        status.text = "Replacement failed"
-                        messageBox (getCurrentException()) title:"Manhunt texture replacement"
-                    )
-                )
-            )
-        )
-    )
-)
-
-rollout MLTEXAbout "About" width:250
+rollout MLTEXAbout "About" width:214
 (
     label heading "MaxLeeds - TEX IO" align:#center
     label games "Liberty City Stories / Vice City Stories" align:#center
@@ -276,11 +206,9 @@ rollout MLTEXAbout "About" width:250
     label credit "spicybung" align:#center
 )
 
-MLTEXWindow = newRolloutFloater "MaxLeeds - Textures" 282 640 320 90
+MLTEXWindow = newRolloutFloater "TEX IO" 248 640 320 90
 addRollout MLTEXImport MLTEXWindow rolledup:false
 addRollout MLTEXExport MLTEXWindow rolledup:false
 MLTEXExportReady = true
 MLUIRefreshTextures()
-addRollout MLTEXManhuntEncode MLTEXWindow rolledup:false
-addRollout MLTEXReplace MLTEXWindow rolledup:false
 addRollout MLTEXAbout MLTEXWindow rolledup:true
